@@ -1,4 +1,4 @@
-# contents
+# Contents
 All code used to analyze data for the publication "Sputum microbiome and COPD status in a rural Ugandan cohort of well-controlled HIV" is deposited in this repository as R markdown scripts, as wel l es their repsective compiled versions in htm format in the sub sirectory "compiled".
 
 # Abstract
