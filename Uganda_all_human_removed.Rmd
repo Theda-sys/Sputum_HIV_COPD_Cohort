@@ -1,0 +1,2398 @@
+---
+title: "uganda_revision"
+author: "Theda Bartolomaeus and Till Birkner"
+date: "1/25/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+```
+## R Markdown Uganda Revison 25.01.2022
+install packages
+```{r cars,  results="hide"}
+library(DirichletMultinomial)
+library(forcats)
+library(reshape2)
+library(magrittr)
+library(dplyr)
+library(cowplot)
+library(ggrepel)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(phyloseq)
+library(devtools)
+library(ggpubr)
+library(rstatix)
+library(patchwork)
+library(ggrepel)
+library(metadeconfoundR)
+library(here)
+library(picante)
+library(microbiome)
+library(biomformat)
+library(plyr)
+library(stringr)
+library(MetBrewer)
+library(cowplot)
+library(lmtest)
+library(lme4)
+library(devtools)
+#install_github("TillBirkner/metadeconfoundR", ref = "develop" , force = T)
+```
+# Load metadata to check the different clinical data 
+
+```{r warning=FALSE}
+load(file = here::here("input", "pretty_metadata_revision.r"))
+rownames(metadata_revison) <- sub("-", ".", rownames(metadata_revison))
+## create variable DualStatus: helps to get an overview of interactions 
+## between HIV and COPD 
+metadata_revison$DualStatus <- paste (metadata_revison$copd, metadata_revison$Hiv_test)
+metadata_revison$DualStatus <- plyr::mapvalues (metadata_revison$DualStatus, from = c ("0 0", "0 1", "1 0", "1 1"), to = c ("COPD-/HIV-", "COPD-/HIV+", "COPD+/HIV-", "COPD+/HIV+"))
+```
+# Load rarefied metagenome abundance tabels (OTU)
+Lotus2 SILVA 138 human contamination removed beforehand
+rarefied via RTK to 832.0000 reads 
+```{r warning=FALSE}
+OTU <-  read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl", "Rarefaction","OTU_rarefied_to_8278.000000_n_0.tsv"), 
+                   header = T, row.names =1) # this OTU table also includes the UK samples
+rtk_div <- read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl", "Rarefaction", "OTU_median_alpha_diversity.tsv"), header = T, row.names = 1, sep = "\t")
+rtk_div <- rtk_div[-c(1), ]
+colnames(rtk_div)<- c("richness", "shannon", "simpson", "inv.simpson", "chao1", "eveness")
+
+## load tree from lotus output to get more diversity measurments
+tree <- read_tree(here::here("input", "Lotus2_Uganda_SLV138", "Tree.tre"))
+faith <- picante::pd(t(OTU), tree, include.root = F)
+eveness <- microbiome::evenness(OTU) #evenness index should be columns
+# merge the new faith measurements on the RKT_div
+rtk_div$fpd <- faith$PD
+rtk_div$Pielou <- eveness$pielou
+```
+Plot histogramm of sample depth @rarefied 
+```{r warning=FALSE, results="hide"}
+# use the rarefied otu and tranform to a phyloseq "OTU table" format
+otu <- otu_table(OTU, taxa_are_rows = T) 
+sample_names(otu) #check sample names
+# transpose so that rows are samples and columns are OTUs
+rg.otus <- t(otu)
+depths <- rowSums(rg.otus)
+hist(depths,breaks=30)
+```
+
+# Load unrarefied metagenome abundance tabelws (OTU)
+no rarefication done here! 
+```{r warning=FALSE}
+nr_otu <- read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl","OTU.txt"),
+                     sep = "\t", header = T, row.names = 1)
+# extract matrix of OTU counts from biom.file
+gg.otus <- nr_otu
+# transpose so that rows are samples and columns are OTUs
+gg.otus <- t(gg.otus)
+```
+Plot histogramm of sample depth
+```{r}
+depth <- rowSums(gg.otus)
+hist(depth,breaks=30)
+```
+Create extra variable: sum of read_counts for each patient -> new variable
+in metadata
+```{r}
+# This is not working, we will solve the issue diffrent. This function
+# is now integrated in metadeconfondR
+rc_nr <- as.data.frame(colSums(nr_otu))
+metadata_revison <- merge(metadata_revison, rc_nr, by = 0)
+colnames(metadata_revison)[ncol(metadata_revison)] <- "rc_nr"
+row.names(metadata_revison) <- metadata_revison$Row.names
+metadata_revison$Row.names <- NULL
+
+```
+Load nr Phlya, we will use the sum(read_counts) for each patient as somewhat
+'rarefication'
+```{r}
+nr_phyla <- read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl","OTU.txt"))
+```
+
+### Standard analysis pipline performed on rarefied data
+#Alpha Diversity - Wilcox with multiple testing 
+#Reduce the dataset to only Ugandian sampels
+linear model: model the effect of HIV, COPD and the interaction term (DualStatus -> positive for both disease) on alpha diversity while 
+controlling for sex, age and bmi
+```{r}
+# merge diversity matrices with metadata
+# rtk_div contains "-" in sample names -> needs to be changed
+rownames(rtk_div) <- sub("-", ".", rownames(rtk_div))
+# reduce the dataset to only Ugandian samples
+rtk_div_uganda <- rtk_div[rownames(rtk_div) %in% rownames(metadata_revison), ]
+
+metadata_revison <- merge(metadata_revison, rtk_div_uganda, by = 0)
+row.names(metadata_revison) <- metadata_revison$Row.names
+metadata_revison$Row.names <- NULL
+## Linear models
+mFull <- lm (data = metadata_revison, rank (shannon) ~ copd + Hiv_test + Sex + age_n + bmi)
+mHiv <- lm (data = metadata_revison, rank (shannon) ~ copd + Sex + age_n + bmi)
+mCopd <- lm (data = metadata_revison, rank (shannon) ~ Hiv_test + Sex + age_n + bmi)
+
+```
+Plot alpha diversity
+```{r}
+metadata_alpha <- metadata_revison[-c(103), ] # E01.LMB202
+metadata_alpha$shannon <-  as.numeric(metadata_alpha$shannon)
+metadata_alpha%>% 
+  # dplyr::group_by(DualStatus)%>%
+  rstatix::wilcox_test(shannon ~ DualStatus)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "DualStatus") -> stats_test
+
+##Plot 
+##Color palette for collections
+# met.brewer("Degas")
+# met.brewer("Cross")
+pal.Coll<- c("#591d06", "#e5a335", "#418979", "#053c29", "#122451")
+
+metadata_alpha %>%
+  #dplyr::group_by(Line)%>%
+  ggplot(aes(x= DualStatus, y= shannon))+
+  geom_boxplot(color= "black", alpha= 0.5, outlier.shape=NA)+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=DualStatus, color = DualStatus))+
+  scale_color_manual(values = pal.Coll)+
+  #scale_fill_npg() +
+  #scale_shape_manual(values = c(21, 24))+
+  xlab("DualStatus")+
+  ylab("Microbiome richness (Shannon Index)")+
+  labs(caption = get_pwc_label(stats_test))+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =10, angle = 90),legend.position = "none")+
+  stat_pvalue_manual(stats_test, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                     tip.length = 0, label = "{p.adj} {p.adj.signif}")-> A
+A
+## richness
+metadata_alpha$richness <-  as.numeric(metadata_alpha$richness)
+metadata_alpha%>% 
+  rstatix::wilcox_test(richness ~ DualStatus)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "DualStatus") -> stats_test_r
+
+metadata_alpha %>%
+  ggplot(aes(x= DualStatus, y= richness))+
+  geom_boxplot(color= "black", alpha= 0.5, outlier.shape=NA)+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=DualStatus, color = DualStatus))+
+  scale_color_manual(values = pal.Coll)+
+  xlab("DualStatus")+
+  ylab("Microbiome richness")+
+  labs(caption = get_pwc_label(stats_test_r))+
+  theme_bw()+
+  theme(text = element_text(size=12), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =10, angle = 90),legend.position = "none")+
+  stat_pvalue_manual(stats_test_r, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                     tip.length = 0, label = "{p.adj} {p.adj.signif}")-> Ar
+Ar
+
+## eveness
+metadata_alpha$eveness <-  as.numeric(metadata_alpha$eveness)
+metadata_alpha%>% 
+  rstatix::wilcox_test(eveness ~ DualStatus)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "DualStatus") -> stats_test_e
+
+##Plot 
+metadata_alpha %>%
+  ggplot(aes(x= DualStatus, y= eveness))+
+  geom_boxplot(color= "black", alpha= 0.5, outlier.shape=NA)+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=DualStatus, color = DualStatus))+
+  scale_color_manual(values = pal.Coll)+
+  xlab("DualStatus")+
+  ylab("Microbiome eveness")+
+  labs(caption = get_pwc_label(stats_test_e))+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =10, angle = 90),legend.position = "none")+
+  stat_pvalue_manual(stats_test_e, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                     tip.length = 0, label = "{p.adj} {p.adj.signif}")-> Ae
+Ae
+
+##chao1
+
+metadata_alpha$chao1 <-  as.numeric(metadata_alpha$chao1)
+metadata_alpha%>% 
+  rstatix::wilcox_test(chao1 ~ DualStatus)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "DualStatus") -> stats_test_c
+
+metadata_alpha %>%
+  ggplot(aes(x= DualStatus, y= chao1))+
+  geom_boxplot(color= "black", alpha= 0.5, outlier.shape=NA)+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=DualStatus, color = DualStatus))+
+  scale_color_manual(values = pal.Coll)+
+  xlab("DualStatus")+
+  ylab("Microbiome richness (chao1 index)")+
+  labs(caption = get_pwc_label(stats_test_c))+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =10, angle = 90),legend.position = "none")+
+  stat_pvalue_manual(stats_test_c, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                     tip.length = 0, label = "{p.adj} {p.adj.signif}")-> Ac
+Ac
+
+## simpson
+metadata_alpha$simpson <-  as.numeric(metadata_alpha$simpson)
+metadata_alpha%>% 
+  rstatix::wilcox_test(simpson ~ DualStatus)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "DualStatus") -> stats_test_s
+
+metadata_alpha %>%
+  ggplot(aes(x= DualStatus, y= simpson))+
+  geom_boxplot(color= "black", alpha= 0.5, outlier.shape=NA)+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=DualStatus, color = DualStatus))+
+  scale_color_manual(values = pal.Coll)+
+  xlab("DualStatus")+
+  ylab("Microbiome richness (simpson index)")+
+  labs(caption = get_pwc_label(stats_test_s))+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =10, angle = 90),legend.position = "none")+
+  stat_pvalue_manual(stats_test_s, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                     tip.length = 0, label = "{p.adj} {p.adj.signif}")-> As
+As
+
+###inv.simpson
+metadata_alpha$inv.simpson <-  as.numeric(metadata_alpha$inv.simpson)
+metadata_alpha%>% 
+  rstatix::wilcox_test(inv.simpson ~ DualStatus)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "DualStatus") -> stats_test_i
+
+metadata_alpha %>%
+  ggplot(aes(x= DualStatus, y= inv.simpson))+
+  geom_boxplot(color= "black", alpha= 0.5, outlier.shape=NA)+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=DualStatus, color = DualStatus))+
+  scale_color_manual(values = pal.Coll)+
+  xlab("DualStatus")+
+  ylab("Microbiome richness")+
+  labs(caption = get_pwc_label(stats_test_i))+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =10, angle = 90),legend.position = "none")+
+  stat_pvalue_manual(stats_test_i, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                     tip.length = 0, label = "{p.adj} {p.adj.signif}")-> Ai
+Ai
+
+#pielou 
+metadata_alpha$Pielou <-  as.numeric(metadata_alpha$Pielou)
+metadata_alpha%>% 
+  rstatix::wilcox_test(Pielou ~ DualStatus)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "DualStatus") -> stats_test_p
+
+metadata_alpha %>%
+  ggplot(aes(x= DualStatus, y= Pielou))+
+  geom_boxplot(color= "black", alpha= 0.5, outlier.shape=NA)+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=DualStatus, color = DualStatus))+
+  scale_color_manual(values = pal.Coll)+
+  xlab("DualStatus")+
+  ylab("Microbiome richness")+
+  labs(caption = get_pwc_label(stats_test_p))+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =10, angle = 90),legend.position = "none")+
+  stat_pvalue_manual(stats_test_p, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                     tip.length = 0, label = "{p.adj} {p.adj.signif}")-> Ap
+Ap
+
+alpha_monster <- cowplot::plot_grid(A, Ai, Ar, Ae, Ac, Ap, As)
+
+# There is one patient with NA -> exclude this one from the analysis
+metadata_alpha <- metadata_revison[-c(103), ] # E01.LMB202
+```
+#Beta Diversity -  PERMANOVA testing 
+reduce the OTUs to only Uganda OTUs
+```{r}
+OTU <- OTU[colnames(OTU) %in% rownames(metadata_revison)]
+beta <- vegan::vegdist (t(OTU), method = "bray", na.rm = T)
+## now we change the NAs to 0, since there is no diffrence between the samples 
+beta[is.na(beta)] <- 0
+pcoaE <- cmdscale (beta, k = 2)
+pcoaE <- as.data.frame(pcoaE)
+
+metadata_revison <- merge(pcoaE, metadata_revison, by = 0)
+row.names(metadata_revison) <- metadata_revison$Row.names
+metadata_revison$Row.names <- NULL
+metadata_revison <- as.data.frame(metadata_revison)
+ # need to exclude patient with NA's E01.LMB202
+metadata_beta <- metadata_revison[-c(103), ]
+centroids <- aggregate(cbind(V1,V2)~DualStatus,metadata_beta,mean)
+metadata_beta %>%
+ggplot (aes (x = V1, y = V2, color = DualStatus)) +
+  theme_classic () + 
+  scale_color_manual(values = pal.Coll) +
+  geom_point (aes (color = DualStatus), size = 5, alpha = 0.8) + 
+  xlab ("PCo 1") + ylab ("PCo 2")+ 
+  theme (axis.title.x = element_text (size = 13), 
+         axis.text.x = element_text (size = 13), 
+         axis.text.y = element_text (size = 13), 
+         axis.title.y = element_text (size = 13),
+         legend.position="left") +
+  stat_ellipse(aes(color = DualStatus)) + 
+  geom_point(data = centroids,
+             size = 5,
+             shape = 16,
+             color = "black") +# centroides hinzufügen
+  geom_point(data = centroids, 
+             size = 4, 
+             shape = 16) -> B
+
+# Add density plots
+metadata_beta %>%
+ggplot(aes(x = V1)) +
+  geom_density(alpha=.5, aes(fill = DualStatus,
+                             color = DualStatus)) +
+  scale_fill_manual(values= pal.Coll) +
+  scale_color_manual(values=pal.Coll) +
+  theme_classic() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x = element_blank(),
+        #axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        #axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position="none") -> xdensity
+xdensity
+
+metadata_beta %>%
+ggplot(aes(V2)) +
+  geom_density(alpha=.5, aes(fill = DualStatus,
+                             color = DualStatus)) +
+  scale_fill_manual(values=pal.Coll) +
+  scale_color_manual(values=pal.Coll) +
+  theme_classic() +
+  theme(#axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    #axis.line.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()) +
+  theme(legend.position = "none") +
+  coord_flip() -> ydensity
+ydensity
+
+# Create blank plot to use for combining beta + the two desity plots
+blankPlot <- ggplot()+geom_blank(aes(1,1))+
+  theme(
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank()
+  )
+# bulid the final plot 
+bigB <-
+  plot_grid(
+    xdensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    blankPlot + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    B + theme(legend.position = "none", 
+              plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    ydensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    nrow = 2,
+    rel_widths = c(4, 1.4),
+    rel_heights = c(1.4, 4),
+    align = "hv"
+  )
+bigB
+
+# PERMANOVA 
+permanova <- adonis (vegdist (t(OTU), method = "bray", na.rm = T) ~ as.factor(DualStatus),data = metadata_revison)
+permanova
+```
+### Cluster approach (DMM)
+Probabilistic method for community typing (or clustering) of microbial community data. Infinite mixture model, which means that the method can infer the optimal number of community types. Note that the number of community types is likely to grow with data size.
+```{r}
+# Read Genus abundance table 
+## Make sure the input is columns being samples and rows being genus
+# includes the UK samples
+genus <- read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl", "Rarefaction", "Genus_rarefied_to_8278.000000_n_0.tsv"), header = T, row.names = NULL, sep = "\t")
+genus$Rarefied <- NULL
+# Remove non bacteria 
+genus <- genus[grep(patter= "Bacteria",x = genus$row.names), ]
+rownames(genus) <- make.names(genus$row.names, unique = TRUE)
+## keep all the Ugandian samples
+genus <- genus[colnames(genus) %in% rownames(metadata_revison)]
+raw <- genus
+#remove names of genus
+raw_values <- t(raw)
+## Remove columnsum = 0
+raw_values <- raw_values[,colSums(raw_values)>0]
+raw_values_t <-t(raw_values)
+#Note that genus_table, columns are samples and rows are genus 
+genus_table <- raw_values_t
+dim(genus_table)# subset the data, genus_lvl count table (no proportion table)
+# colnames(genus_table) #colnames should be samples
+# row.names(genus_table) #rownames should be genus
+# use the stringsplit function to get proper genus names: 
+# Archaea.Halobacterota.Methanosarcinia.Methanosa..-> to short
+genus_p <- as.data.frame(row.names(genus_table))
+colnames(genus_p) <- "long_names"
+pretty_names <- tidyr::separate(genus_p, 
+                long_names, into = c("A", "B", "C", "D", "E", "F"), 
+                sep = "\\.", fill = "right", 
+                extra = "drop")
+write.table(pretty_names,
+            here::here("output","genus_names_pretty.tsv"))
+# add short names to genus_table
+genus_table <- as.data.frame(genus_table) #genus_table was integr
+genus_table$short <- pretty_names$F
+row.names(genus_table) <- make.names(genus_table$short, unique = T) #overcome duplicate row.names are not allowed 
+genus_table$short <- NULL
+genus_table=genus_table/min(genus_table[genus_table>0])
+
+# Fit dirichlet multinomial model
+all_dmns = 6 #max dirichlets to check for minimum information criteria
+dmn_list = numeric(all_dmns)
+for(i in 1:all_dmns){
+  print(i)
+  assign(paste0("dmn_", i), dmn(as.matrix(t(genus_table )), i, verbose=F))
+}
+dmn_list = list(dmn_1, dmn_2, dmn_3, dmn_4, dmn_5, dmn_6)
+
+save(dmn_list, file = here::here("output", "dmn_list_uganda.tsv"))
+lplc <- sapply(dmn_list, laplace)
+plot(lplc, type="b", xlab="Number of Dirichlet Components",ylab="Model Fit")
+# best fit ist 5 The best fit is for k = 5distinct Dirichletcomponents.
+#save clusters / metacommunities
+Dirichlet_multinomial_1 = mixture(dmn_list[[1]], assign = TRUE)
+Dirichlet_multinomial_2 = mixture(dmn_list[[2]], assign = TRUE)
+Dirichlet_multinomial_3 = mixture(dmn_list[[3]], assign = TRUE)
+Dirichlet_multinomial_4 = mixture(dmn_list[[4]], assign = TRUE)
+Dirichlet_multinomial_5 = mixture(dmn_list[[5]], assign = TRUE)
+Dirichlet_multinomial_6 = mixture(dmn_list[[6]], assign = TRUE)
+
+Dirichlet_multinomial_all = data.frame(cbind(Dirichlet_multinomial_1,
+                                             Dirichlet_multinomial_2,Dirichlet_multinomial_3,
+                                             Dirichlet_multinomial_4,Dirichlet_multinomial_5,
+                                             Dirichlet_multinomial_6))
+colnames(Dirichlet_multinomial_all) = c("DMM_k=1","DMM_k=2","DMM_k=3",
+                                        "DMM_k=4","DMM_k=5","DMM_k=6")
+
+# minimum information criteria
+lplc <- sapply(dmn_list, laplace)
+BIC <- sapply(dmn_list, BIC)
+AIC <- sapply(dmn_list, AIC)
+dmn_list[[which.min(lplc)]] # optimal number of metacommunities (Laplace information criterion)
+dmn_list[[which.min(BIC)]] # optimal number of metacommunities (Bayesian information criterion)
+dmn_list[[which.min(AIC)]]# optimal number of metacommunities (Akaike information criterion)
+
+# plot information criteria
+plot(lplc, type="b", xlab="Number of Dirichlet Components", ylab="Model Fit, Laplace",
+     main = "Model fit as a function of Dirichlet component number")
+# k = 5
+plot(BIC, type="b", xlab="Number of Dirichlet Components", ylab="Model Fit, BIC",
+     main = "Model fit as a function of Dirichlet component number")
+# K = 1
+plot(AIC, type="b", xlab="Number of Dirichlet Components", ylab="Model Fit, AIC",
+     main = "Model fit as a function of Dirichlet component number")
+# k = 2
+```
+
+```{r}
+fit <- dmn_list
+best <- fit[[3]]
+#### so we want to get the weights of influence on the models from the different genera: 
+## relative abundance = contribution to each pulmotype(?) 
+cluster_imp <- fitted(best) ## get the cluster importance 
+p1 <- fitted(fit[[1]], scale=TRUE)# vergleich gegen das model wo alles in einem 
+# gefittet ist 
+p5 <- fitted(best, scale=TRUE)
+
+meandiff <- colSums(abs(p5 - as.vector(p1)))
+meandiff
+x <- mixture(best)
+
+### plot the pulmotypes
+plot_list = list()
+for (k in seq(ncol(fitted(best)))) {
+  d <- melt(fitted(best))
+  colnames(d) <- c("OTU", "cluster", "value")
+  d <- subset(d, cluster == k) %>%
+    # Arrange OTUs by assignment strength
+    arrange(value) %>%
+    mutate(OTU = factor(OTU, levels = unique(OTU))) %>%
+    # Only show the most important drivers
+    filter(abs(value) > quantile(abs(value), 0.8))     
+ 
+gg_color_hue <- function(n) {
+ hues = seq(15, 375, length = n + 1)
+ hcl(h = hues, l = 65, c = 100)[1:n]
+}
+cols = gg_color_hue(3)
+   
+  p <- ggplot (d [(length(d$value)-10):length(d$value), ], 
+               aes(x = OTU , y = value)) +
+    xlab("") + 
+    ylab("contribution to cluster") +
+    geom_bar(stat = "identity", fill = cols[k], colour="black") +
+    coord_flip() +
+    theme_classic() +
+    theme(axis.text.y = element_text(face = "italic"),
+          axis.text = element_text(size = 13, face ='bold'),
+          axis.title = element_text(size = 15, face = 'bold'))
+  
+  
+  plot_list[[k]]= p
+}
+
+plot <- cowplot::plot_grid(plot_list[[1]], plot_list[[2]], plot_list[[3]], nrow = 2, align = "vh")
+plot
+```
+alpha div. community type metadeconfR run 
+alpha div indices as features, metadata includes the community types
+```{r}
+alpha_features <- rtk_div_uganda
+meta_alpha_decon <- metadata_alpha
+
+# changed TG 13.05.2022
+cluster_result <- as.data.frame(Dirichlet_multinomial_3)
+# end change
+
+meta_alpha_decon <- merge(meta_alpha_decon, cluster_result, by = 0)
+row.names(meta_alpha_decon) <- meta_alpha_decon$Row.names
+meta_alpha_decon$Row.names <- NULL
+meta_alpha_decon$Dirichlet_multinomial_3[meta_alpha_decon$Dirichlet_multinomial_3 ==1] <- "Streptococcus"
+meta_alpha_decon$Dirichlet_multinomial_3[meta_alpha_decon$Dirichlet_multinomial_3 ==2] <- "Mixture"
+meta_alpha_decon$Dirichlet_multinomial_3[meta_alpha_decon$Dirichlet_multinomial_3 ==3] <- "Prevotella"
+meta_alpha_decon$smpl <- row.names(meta_alpha_decon)
+meta_alpha_decon <- fastDummies::dummy_cols(.data = meta_alpha_decon, select_columns = "Dirichlet_multinomial_3")
+row.names(meta_alpha_decon) <- meta_alpha_decon$smpl
+meta_alpha_decon$smpl <- NULL
+meta_alpha_decon$Dirichlet_multinomial_3 <- NULL
+
+alpha_features <- alpha_features[rownames(alpha_features) %in% rownames(meta_alpha_decon), ]
+alpha_features$richness <- as.numeric(alpha_features$richness)
+alpha_features$shannon <- as.numeric(alpha_features$shannon)
+alpha_features$simpson <- as.numeric(alpha_features$simpson)
+alpha_features$inv.simpson <- as.numeric(alpha_features$inv.simpson)
+alpha_features$chao1 <- as.numeric(alpha_features$chao1)
+alpha_features$eveness <- as.numeric(alpha_features$eveness)
+alpha_features$fpd <- NULL
+
+alpha_features <- alpha_features[order(rownames(alpha_features)), ]
+meta_alpha_decon <- meta_alpha_decon[order(rownames(meta_alpha_decon)), ]
+meta_alpha_decon <- meta_alpha_decon[, -c(42:49)]
+
+meta_alpha_out <- metadeconfoundR::MetaDeconfound(featureMat = alpha_features , 
+                                   metaMat = meta_alpha_decon, nnodes = 4, 
+                                   logfile = here::here("intermediate", "MetadeconfoundR_feature_alpha.log"))
+
+alpha_metaDR <- metadeconfoundR::BuildHeatmap(meta_alpha_out,
+                   d_col = c("blue", "white", "red"),
+                   d_range = "full")
+ 
+```
+
+```{r}
+## change the colors 
+ComCol <- c("chartreuse3", "deepskyblue2", "red3")
+cluster_result <- as.data.frame(Dirichlet_multinomial_3)
+#Plot the Beta diversity colored for the different Clusters 
+
+metadata_beta <- merge(metadata_beta, cluster_result, by = 0)
+metadata_beta$cluster <- NULL
+row.names(metadata_beta) <- metadata_beta$Row.names
+metadata_beta$Row.names <- NULL
+# change the colnames, since they got a little messy
+metadata_beta$Dirichlet_multinomial_3 <- as.character(metadata_beta$Dirichlet_multinomial_3)
+# prepare the plot
+centroids <- aggregate(cbind(V1,V2)~Dirichlet_multinomial_3,metadata_beta,mean)
+metadata_beta %>%
+ggplot (aes (x = V1, y = V2, color = Dirichlet_multinomial_3)) +
+  theme_classic () + 
+  scale_color_manual(values = ComCol) +
+  geom_point (aes (color = Dirichlet_multinomial_3), 
+              size = 5, alpha = 0.8) + 
+  xlab ("PCo 1") + ylab ("PCo 2")+ 
+  theme (axis.title.x = element_text (size = 13), 
+         axis.text.x = element_text (size = 13), 
+         axis.text.y = element_text (size = 13), 
+         axis.title.y = element_text (size = 13),
+         legend.position="none") +
+  stat_ellipse(aes(color = Dirichlet_multinomial_3)) + 
+  geom_point(data = centroids,
+             size = 5,
+             shape = 16,
+             color = "black") +# centroides hinzufügen
+  geom_point(data = centroids, 
+             size = 4, 
+             shape = 16) -> Bcluster
+
+# Add density plots
+metadata_beta %>%
+ggplot(aes(x = V1)) +
+  geom_density(alpha=.5, aes(fill = Dirichlet_multinomial_3,
+                             color = Dirichlet_multinomial_3)) +
+  scale_fill_manual(values= ComCol) +
+  scale_color_manual(values=ComCol) +
+  theme_classic() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x = element_blank(),
+        #axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        #axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position="none") -> xdensity
+xdensity
+
+metadata_beta %>%
+ggplot(aes(V2)) +
+  geom_density(alpha=.5, aes(fill = Dirichlet_multinomial_3,
+                             color = Dirichlet_multinomial_3)) +
+  scale_fill_manual(values=ComCol) +
+  scale_color_manual(values=ComCol) +
+  theme_classic() +
+  theme(#axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    #axis.line.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()) +
+  theme(legend.position = "none") +
+  coord_flip() -> ydensity
+ydensity
+
+# Create blank plot to use for combining beta + the two desity plots
+blankPlot <- ggplot()+geom_blank(aes(1,1))+
+  theme(
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank()
+  )
+# bulid the final plot 
+Bpul <-
+  cowplot::plot_grid(
+    xdensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    blankPlot + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    Bcluster + theme(legend.position = "none", 
+              plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    ydensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    nrow = 2,
+    rel_widths = c(1, 0.5),
+    rel_heights = c(0.5, 1),
+    align = "hv"
+  )
+Bpul
+```
+Community types described by relative abundance of Genera
+```{r, results="hide"}
+# use genus_table from community typing
+genus_community <- as.data.frame(t(genus_table))
+# reduce the dataset
+ad.index.keep <- which(colSums(genus_community)*100/(sum(genus_community)) > 0.01) 
+genus_community <- genus_community[, ad.index.keep]
+dim(genus_community)
+order(row.names(genus_community))
+genus_community <- as.data.frame(genus_community)
+genus_community$Smpl <- row.names(genus_community)
+genus_community <- genus_community[rownames(genus_community) %in% rownames(metadata_revison),]
+cluster_abundance <- merge(genus_community, cluster_result, by = 0)
+row.names(cluster_abundance) <- cluster_abundance$Row.names
+cluster_abundance$Row.names <- NULL
+cluster_abundance$Smpl <- NULL
+
+# MEDIAN
+cluster_abundance_1 <-
+  apply(cluster_abundance[cluster_abundance$Dirichlet_multinomial_3 == "1",-ncol(cluster_abundance)], 2, mean)
+cluster_abundance_2 <-
+ apply(cluster_abundance[cluster_abundance$Dirichlet_multinomial_3 == "2",-ncol(cluster_abundance)], 2, mean)
+cluster_abundance_3 <-
+ apply(cluster_abundance[cluster_abundance$Dirichlet_multinomial_3 == "3",-ncol(cluster_abundance)], 2, mean)
+
+# merging
+cluster_merged <-
+  rbind(cluster_abundance_1,
+        cluster_abundance_2,
+        cluster_abundance_3)
+
+
+## Plot the Abundance 
+cluster_rel <- cluster_merged
+cluster_rel <- as.data.frame(t(cluster_rel))
+cluster_rel <- apply(cluster_merged, 1, function(x) x/sum(x)) # rows 1 als prozente
+
+## use cluster_imp 
+clr <- cluster_rel
+clr_import <- merge(clr, cluster_imp, by = 0)
+row.names(clr_import) <- clr_import$Row.names
+clr_import$Row.names <- NULL
+
+cluster_rel <- cluster_rel[names(sort(rowSums(cluster_rel), decreasing = TRUE)[1:15]), ]
+
+cluster_rel <- as.data.frame(cluster_rel)
+cluster_rel$Genus <- row.names(cluster_rel)
+for (i in 1:3) {
+ cluster_rel[, i] <- as.numeric(cluster_rel[, i])
+} # convert to numerical
+
+colnames(cluster_rel) <- c("community type 1", "community type 2", "community type 3", "Genus")
+molten_cluster_rel<- reshape2::melt(data = cluster_rel, id.vars = "Genus")
+molten_cluster_rel$labels <- scales::percent(molten_cluster_rel$value)
+
+
+com_relGenus <- ggplot (data = molten_cluster_rel, 
+                     aes(x = value, y = variable, fill = Genus)) +
+ geom_bar(position = "dodge", stat = "identity", color = "black") +
+ theme_classic() +
+ theme(axis.text.x = element_text(angle = 90)) +
+ xlab("Relative Abundance") +
+ ylab("Community type")
+print(com_relGenus)
+```
+absolute abundance 
+```{r, results="hide"}
+
+# er tranformiert automatisch 
+cluster_ab <- as.data.frame(t(cluster_merged))
+cluster_ab <- cluster_ab[names(sort(rowSums(cluster_ab), 
+                                    decreasing = TRUE)[1:15]), ] 
+#nur 1-6 raussuchen wir wollen die größten 6 drinnen behalten 
+# delete Bacteria in front of Phylum names
+cluster_ab <- as.data.frame(cluster_ab)
+#id Phylum erstellen row.names must be phylum colnames COPD and shit
+# rel_Phylum <-t(rel_Phylum)
+cluster_ab$Genus <- row.names(cluster_ab)
+
+for (i in 1:3) {
+  cluster_ab[, i] <- as.numeric(cluster_ab[, i])
+} # macht aus den abundance für die bacteria numerical zahlen
+
+colnames(cluster_ab) <- c("community type 1", "community type 2",  "community type 3", "Genus")
+molten_cluster_ab <- reshape2::melt(data = cluster_ab, id.vars = "Genus")
+molten_cluster_ab$labels <- scales::percent(molten_cluster_ab$value)
+
+# appended_molten <- read.csv(file = "molten_Phylum_intermediate.cvs", sep = "\t")
+
+com_abGenus <- ggplot (data = molten_cluster_ab, 
+                     aes(x = value,
+                         y = variable, fill = Genus)) +
+  geom_bar(position="dodge", stat = "identity", color = "black") +
+  # geom_text(aes(label = labels), vjust=1.6) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "top") +
+  xlab("community type") +
+  ylab("absolute abundance")
+print(com_abGenus)
+```
+subset to color each community type diffrently 
+```{r}
+
+# use the clr_import
+r1 <- clr_import [, c(1,4)]
+r1 <- r1[order(r1$V1, decreasing = TRUE)[1:11],]
+r1$Genus <- row.names(r1)
+
+r1 %>%
+  mutate(Genus = fct_reorder(Genus, cluster_abundance_1)) %>%
+  ggplot (aes(x = Genus, y = V1, fill = "tomato2"))+
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = round(cluster_abundance_1, digits = 3)), position = "dodge")+
+  # geom_text(aes(label = labels), vjust=1.6) +
+  theme_classic() +
+  coord_flip()+
+   theme(axis.text.x = element_text(size =12),
+         axis.title.x = element_blank(),
+        axis.text.y = element_text(face = "italic", size = 12),
+        legend.position = "none") +
+  ylab("cluster importance") -> rcom1
+
+rcom1
+```
+```{r}
+r2 <- clr_import [, c(2,5)]
+r2 <- r2[order(r2$V2, decreasing = TRUE)[1:11],]
+r2$Genus <- row.names(r2)
+
+r2 %>%
+  mutate(Genus = fct_reorder(Genus, cluster_abundance_2)) %>%
+  ggplot (aes(x = Genus, y = V2))+
+  geom_bar(position="dodge", stat = "identity", color = "black", fill ="chartreuse3") +
+  geom_text(aes(label = round(cluster_abundance_2, digits = 3)), position = "dodge")+
+  # geom_text(aes(label = labels), vjust=1.6) +
+  theme_classic() +
+  coord_flip()+
+   theme(axis.text.x = element_text(size = 12),
+         axis.title.x = element_blank(),
+        axis.text.y = element_text(face = "italic", size = 12),
+        legend.position = "none") +
+  ylab("cluster importance") -> rcom2
+rcom2
+```
+```{r}
+r3 <- clr_import [, c(3,6)]
+r3 <- r3[order(r3$V3, decreasing = TRUE)[1:11],]
+r3$Genus <- row.names(r3)
+
+r3 %>%
+  mutate(Genus = fct_reorder(Genus, cluster_abundance_3)) %>%
+  ggplot (aes(x = Genus, y = V3))+
+  geom_bar(position="dodge", stat = "identity", color = "black", fill ="deepskyblue2") +
+    geom_text(aes(label = round(cluster_abundance_3, digits = 3)), position = "dodge")+
+  # geom_text(aes(label = labels), vjust=1.6) +
+  theme_classic() +
+  coord_flip() +
+  theme(axis.text.x = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(face = "italic", size = 12),
+        legend.position = "none") -> rcom3
+rcom3
+```
+plot grid
+```{r}
+rcomcom <- cowplot::plot_grid(rcom1, rcom2, rcom3, Bpul)
+rcomcom
+```
+
+```{r}
+cluster_abso <- ggplot (data = molten_cluster_ab, 
+                     aes(x = value, y = variable, fill = Genus)) +
+ geom_bar(stat = "identity", color = "black") +
+ theme_classic() +
+ theme(axis.text.x = element_text(angle = 90)) +
+ xlab("Relative Abundance") +
+ ylab("Disease Status")
+print(cluster_abso)
+```
+
+Chiq-test + heatmaps for the community types between diffrent disease states 
+```{r}
+#### now look at the distributions of the pulmotypes amoung the two studie cohort 
+metadata_beta$Dirichlet_multinomial_3[metadata_beta$Dirichlet_multinomial_3 == 1] <- "Streptococcus"
+metadata_beta$Dirichlet_multinomial_3[metadata_beta$Dirichlet_multinomial_3 == 2] <- "Mixed"
+metadata_beta$Dirichlet_multinomial_3[metadata_beta$Dirichlet_multinomial_3 == 3] <- "Prevotella"
+metadata_beta$Hiv_test[metadata_beta$Hiv_test == 0] <- "HIV negative"
+metadata_beta$Hiv_test[metadata_beta$Hiv_test == 1] <- "HIV postive"
+
+
+aFrame_com_1 <- reshape2::melt(t(apply(table (metadata_beta$Hiv_test, metadata_beta$Dirichlet_multinomial_3),
+                         1, function(x) x/sum(x))))
+heatmapcom <- ggplot (aFrame_com_1, aes (x = Var1, y = Var2)) +
+  theme_classic () +
+  theme (axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+         legend.position = "none", 
+         axis.title = element_blank()) +
+  geom_tile (aes (fill = value), colour = "black") +
+  geom_text (aes (label = scales::percent(value, accuracy = 1))) +
+  scale_fill_gradient(high = "#d7301f", low = "#fff7ec") 
+# scale_color_brewer(palette = "PiYG") +
+print(heatmapcom) 
+
+
+metadata_beta$copd[metadata_beta$copd == 0] <- "COPD negative"
+metadata_beta$copd[metadata_beta$copd == 1] <- "COPD postive"
+
+
+aFrame_com_2 <- reshape2::melt(t(apply(table (metadata_beta$copd, metadata_beta$Dirichlet_multinomial_3),
+                         1, function(x) x/sum(x))))
+heatmapcom_1 <- ggplot (aFrame_com_2, aes (x = Var1, y = Var2)) +
+  theme_classic () +
+  theme (axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1), axis.text.y = element_blank(),
+         legend.position = "none", 
+         axis.title = element_blank()) +
+  geom_tile (aes (fill = value), colour = "black") +
+  geom_text (aes (label = scales::percent(value, accuracy = 1))) +
+  scale_fill_gradient(high = "#d7301f", low = "#fff7ec") 
+# scale_color_brewer(palette = "PiYG") +
+print(heatmapcom_1) 
+
+aFrame <- cowplot::plot_grid(heatmapcom, heatmapcom_1, align = "hv")
+aFrame
+```
+
+Relative abundance: main Phyla and Genera with median and IQ range
+Relative abundance shown in Genus/Phyla stratified for Disease status
+```{r, results="hide"}
+# Phylum
+Phylum <- read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl","Rarefaction", "Phylum_rarefied_to_8278.000000_n_0.tsv"), header = T)
+## remove Eukaryotes/Archaea
+Phylum <- Phylum[grep(patter= "Bacteria",x = Phylum$Rarefied), ]
+row.names(Phylum) <- Phylum$Rarefied
+Phylum$Rarefied <- NULL
+Phylum <- as.data.frame(t(Phylum))
+dim(Phylum)
+# reduce the dataset
+ad.index.keep <- which(colSums(Phylum)*100/(sum(Phylum)) > 0.01)
+Phylum <- Phylum[, ad.index.keep]
+dim(Phylum)
+
+
+metadata_revison <- metadata_revison[order(row.names(metadata_revison)), ]
+
+# row.names(Phylum)
+class(Phylum)
+Phylum$Smpl <- row.names(Phylum)
+Phylum <- Phylum[rownames(Phylum) %in% rownames(metadata_revison),]
+metadata_revison$Smpl <- row.names(metadata_revison)
+# only select Disease Status(DualStatus) and Smpl 
+metadata <- metadata_revison[c("DualStatus", "Smpl")] 
+Abundance <- left_join(Phylum, metadata)
+Abundance$Smpl <- NULL
+# MEAN
+Abundance_COPD <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV-",-ncol(Abundance)], 2, mean)
+Abundance_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV+",-ncol(Abundance)], 2, mean)
+Abundance_COPD_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV+",-ncol(Abundance)],2, mean)
+Abundance_neg <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV-",-ncol(Abundance)], 2, mean)
+# merging
+Abundance_merged <-
+  rbind(Abundance_COPD,
+        Abundance_COPD_HIV,
+        Abundance_HIV,
+        Abundance_neg)
+# Apply function on the mean abundance for each disease
+Abundance_merged <- apply(Abundance_merged, 2, function(x) round(x, digits = 2)) 
+
+# IQR
+Abundance_COPD <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV-",-ncol(Abundance)], 2, IQR)
+Abundance_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV+",-ncol(Abundance)], 2, IQR)
+Abundance_COPD_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV+",-ncol(Abundance)],2, IQR)
+Abundance_neg <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV-",-ncol(Abundance)], 2, IQR)
+# merging
+Abundance_merged_1 <-
+  rbind(Abundance_COPD,
+        Abundance_COPD_HIV,
+        Abundance_HIV,
+        Abundance_neg)
+# prepare a new dataframe
+Abundance_merged_2 <- Abundance_merged 
+for (i in 1:nrow(Abundance_merged)) {
+  Abundance_merged_2[i,] <-
+    paste0(Abundance_merged[i,], " (±", Abundance_merged_1[i,], ")")
+
+}
+
+rel_Phylum <- Abundance_merged_2
+colnames(rel_Phylum) <- sub("Bacteria;",  "", colnames(rel_Phylum))
+rel_Phylum <- as.data.frame(rel_Phylum)
+
+topabundance <- Abundance
+colnames(topabundance) <- sub("Bacteria;",  "", colnames(topabundance))
+topabundance <- topabundance[, colnames(topabundance) %in% colnames(rel_Phylum)]
+topabundance$DualStatus <- Abundance$DualStatus
+rel_Phylum <- rel_Phylum[, sort(colnames(rel_Phylum))]
+
+### now do some statistical testing use pairwise Wilcox on the abundance dataframe, with all the bacteria
+x <- vector(length = ncol(topabundance)-1, mode = "double")
+for(i in 1:(ncol(topabundance)-1)){
+  print(colnames(topabundance)[i])
+  x[i] <- chisq.test(topabundance[, i], topabundance$DualStatus)$p.value
+}
+# correct for multiple testing
+x <- p.adjust(x, method = "fdr")
+rel_Phylum <- rbind(rel_Phylum, x)
+row.names(rel_Phylum)[5] <- "Chisq-test p value"
+rel_Phylum[5, ] <- round(as.numeric(rel_Phylum[5, ]), digits = 2)
+
+write.table(rel_Phylum, file = here::here("output", "mean_iqr_rel_abundance_phylum.tsv"),
+            sep = "\t",quote = F)
+
+## Plot the Abundance 
+p_rel_P <- Abundance_merged
+p_rel_P <- as.data.frame(t(p_rel_P))
+p_rel_P$Phylum <- row.names(p_rel_P)
+
+for (i in 1:4) {
+ p_rel_P[, i] <- as.numeric(p_rel_P[, i])
+} # convert abundance to numeric dataframe
+
+colnames(p_rel_P) <- c("COPD+/HIV-", "COPD-/HIV+", "COPD+/HIV+","COPD-/HIV-", "Phylum")
+molten_rel_Phylum <- melt(data = p_rel_P, id.vars = "Phylum")
+molten_rel_Phylum$labels <- scales::percent(molten_rel_Phylum$value)
+molten_rel_Phylum$variable <- str_replace((molten_rel_Phylum$variable), "Abundance_", "")
+
+pControls <- ggplot (data = molten_rel_Phylum, 
+                     aes(x = value, y = variable, fill = Phylum)) +
+ geom_bar(position = "dodge", stat = "identity", color = "black") +
+ theme_classic() +
+ theme(axis.text.x = element_text(angle = 90)) +
+ xlab("Relative Abundance") +
+ ylab("Disease Status")
+print(pControls)
+```
+
+```{r}
+phylum_wave <- ggplot (data = molten_rel_Phylum, 
+                     aes(x = variable, y = value, fill = Phylum, group = Phylum)) +
+ geom_area(position = "stack", color = "black") +
+ theme_classic() +
+ theme(axis.text.x = element_text(angle = 90)) +
+ xlab("Relative Abundance") +
+ ylab("Disease Status")
+phylum_wave
+```
+diffrent display 
+```{r}
+p_relphylum <- ggplot (data = molten_rel_Phylum, 
+                     aes(x = variable, y = value, fill = Phylum)) +
+ geom_bar(position = "dodge", stat = "identity", color = "black") +
+ theme_classic() +
+ theme(axis.text.x = element_text(angle = 90)) +
+ xlab("Disease Status") +
+ ylab("Relative Abundance")
+print(p_relphylum)
+```
+
+```{r, results="hide"}
+# Genus 
+Genus <- genus_table
+Genus <- t(Genus)
+# reduce the dataset
+ad.index.keep <- which(colSums(Genus)*100/(sum(Genus)) > 0.01) 
+Genus <- Genus[, ad.index.keep]
+dim(Genus)
+order(row.names(Genus))
+Genus <- as.data.frame(Genus)
+Genus$Smpl <- row.names(Genus)
+# write.table(md_Dualstatus, file = "~/Dropbox/Uganda_secondRevision/input/md_Dualstatus.tsv", sep = "\t", quote = F)
+md_Dualstatus <- read.table("~/Dropbox/Uganda_secondRevision/input/md_Dualstatus.tsv", row.names = 1, header = T, sep = "\t")
+Genus <- Genus[rownames(Genus) %in% rownames(md_Dualstatus), ]
+
+Abundance_g <- merge(Genus,md_Dualstatus, by = 0)
+Abundance_g$Row.names <- NULL
+Abundance_g$Smpl <- NULL
+
+# MEDIAN
+Abundance_g_COPD <-
+  apply(Abundance_g[Abundance_g$DualStatus == "COPD+/HIV-",-ncol(Abundance_g)], 2, mean)
+Abundance_g_HIV <-
+  apply(Abundance_g[Abundance_g$DualStatus == "COPD-/HIV+",-ncol(Abundance_g)], 2, mean)
+Abundance_g_COPD_HIV <-
+  apply(Abundance_g[Abundance_g$DualStatus == "COPD+/HIV+",-ncol(Abundance_g)],2, mean)
+Abundance_g_neg <-
+  apply(Abundance_g[Abundance_g$DualStatus == "COPD-/HIV-",-ncol(Abundance_g)], 2, mean)
+# merging
+Abundance_g_merged <-
+  rbind(Abundance_g_COPD,
+        Abundance_g_COPD_HIV,
+        Abundance_g_HIV,
+        Abundance_g_neg)
+
+Abundance_g_merged <- apply(Abundance_g_merged, 2, function(x) round(x, digits = 2)) 
+# IQR 
+Abundance_g_COPD <-
+  apply(Abundance_g[Abundance_g$DualStatus == "COPD+/HIV-",-ncol(Abundance_g)], 2, IQR)
+Abundance_g_HIV <-
+  apply(Abundance_g[Abundance_g$DualStatus == "COPD-/HIV+",-ncol(Abundance_g)], 2, IQR)
+Abundance_g_COPD_HIV <-
+  apply(Abundance_g[Abundance_g$DualStatus == "COPD+/HIV+",-ncol(Abundance_g)],2, IQR)
+Abundance_g_neg <-
+  apply(Abundance_g[Abundance_g$DualStatus == "COPD-/HIV-",-ncol(Abundance_g)], 2, IQR)
+# merging
+Abundance_g_merged_1 <-
+  rbind(Abundance_g_COPD,
+        Abundance_g_COPD_HIV,
+        Abundance_g_HIV,
+        Abundance_g_neg)
+# create new datafram
+Abundance_g_merged_2 <- Abundance_g_merged
+for (i in 1:nrow(Abundance_g_merged)) {
+  Abundance_g_merged_2[i,] <-
+    paste0(Abundance_g_merged[i,], " (±", Abundance_g_merged_1[i,], ")")
+
+}
+
+rel_Genus <- Abundance_g_merged_2
+rel_Genus <- as.data.frame(rel_Genus)
+rel_Genus <- rel_Genus[, sort(colnames(rel_Genus))]
+
+topabundance_g <- Abundance_g
+### now do some statistical testing use pairwise Wilcox on the abundance dataframe
+x <- vector(length = ncol(topabundance_g)-1, mode = "double")
+for(i in 1:(ncol(topabundance_g)-1)){
+  print(colnames(topabundance_g)[i])
+  x[i] <- chisq.test(topabundance_g[, i], topabundance_g$DualStatus)$p.value
+
+}
+x <- p.adjust(x, method = "fdr")
+rel_Genus <- rbind(rel_Genus, x)
+row.names(rel_Genus)[5] <- "Chisq-test p value"
+rel_Genus[5, ] <- round(as.numeric(rel_Genus[5, ]), digits = 2)
+
+write.table(rel_Genus, file = here::here("output", "mean_iqr_rel_abundance_genus_new.tsv"),
+            sep = "\t",quote = F)
+
+## Plot the Abundance 
+p_rel_G <- Abundance_g_merged
+p_rel_G <- as.data.frame(t(p_rel_G))
+p_rel_G <- p_rel_G[names(sort(rowSums(p_rel_G), decreasing = TRUE)[1:15]), ]
+colnames(p_rel_G) <- c("COPD+/HIV-", "COPD-/HIV+", "COPD+/HIV+","COPD-/HIV-")
+
+help_genus <- t(Abundance_g_merged)
+p_rel_rest <- help_genus[!(row.names(help_genus) %in% row.names(p_rel_G)), ]
+colnames(p_rel_rest) <- c("COPD+/HIV-", "COPD-/HIV+", "COPD+/HIV+","COPD-/HIV-")
+p_rel_rest_sum <- as.data.frame(colSums(p_rel_rest))
+colnames(p_rel_rest_sum) <- c("residual")
+p_rel_rest_sum <- as.data.frame(t(p_rel_rest_sum))
+# p_rel_rest_sum$Genus <- c("residual")
+
+
+# merge cbind the rest row onto the p_rel_G dataframe 
+p_rel_G <- rbind(p_rel_G, p_rel_rest_sum)
+p_rel_G$Genus <- row.names(p_rel_G)
+for (i in 1:4) {
+ p_rel_G[, i] <- as.numeric(p_rel_G[, i])
+} # convert to numerical
+
+colnames(p_rel_G) <- c("COPD+/HIV-", "COPD-/HIV+", "COPD+/HIV+","COPD-/HIV-", "Genus")
+molten_rel_Genus <- reshape2::melt(data = p_rel_G, id.vars = "Genus")
+molten_rel_Genus$labels <- scales::percent(molten_rel_Genus$value)
+molten_rel_Genus$variable <- str_replace((molten_rel_Genus$variable), "Abundance_", "")
+
+p_relGenus <- ggplot (data = molten_rel_Genus, 
+                     aes(x = value, y = variable, fill = Genus)) +
+ geom_bar(position = "dodge", stat = "identity", color = "black") +
+ theme_classic() +
+ theme(axis.text.x = element_text(angle = 90)) +
+ xlab("Relative Abundance") +
+ ylab("Disease Status")
+print(p_relGenus)
+```
+
+Try a diffrent approach
+Disease status
+```{r content-area}
+genus_wave <- ggplot (data = molten_rel_Genus, 
+                     aes(x = variable, y = value, fill = Genus, group = Genus)) +
+ geom_area(position = "stack", color = "black") +
+ theme_classic() +
+ theme(axis.text.x = element_text(angle = 90)) +
+ xlab("Relative Abundance") +
+ ylab("Disease Status")
+genus_wave
+```
+
+```{r}
+
+stack_genus <- ggplot (data = molten_rel_Genus, 
+                     aes(x = value, y = variable, fill = Genus)) +
+ geom_bar(stat = "identity", color = "black") +
+ theme_classic() +
+ theme(axis.text.x = element_text(angle = 90, size = 12), axis.title.y = element_text(size=12)) +
+ xlab("Relative Abundance") +
+ ylab("Disease Status")
+print(stack_genus)
+### try to reoder this - so rest is at the end of the plot
+```
+
+
+Create nice feature names for the metadeconfoundR output
+```{r, results="hide"}
+feature_names <- as.data.frame(row.names(genus_table))
+feature_names$names <- feature_names$`row.names(genus_table)`
+
+feature_names$names <- sub("_bacterium_2", "", feature_names$names)
+feature_names$names <- sub("_bacterium_2", "", feature_names$names)
+feature_names$names <- sub("unknown_", "", feature_names$names)
+feature_names$names <- sub("uncultured_", "", feature_names$names)
+feature_names$names <- str_replace_all(feature_names$names, " 2", " 2*")
+feature_names$names <- str_replace_all(feature_names$names, " 3", " 3*")
+feature_names$names <- str_replace_all(feature_names$names, " 1", " 1*")
+feature_names$names <- str_replace_all(feature_names$names, " 4", " 4*")
+feature_names$names <- str_replace_all(feature_names$names, " 7", " 7*")
+feature_names$names <- str_replace_all(feature_names$names, " 6", " 6*")
+feature_names$names <- str_replace_all(feature_names$names, " 5", " 5*")
+feature_names$names <- str_replace_all(feature_names$names, "_", " ")
+
+write.table(feature_names, file = here::here("intermediate/feature_names.tsv"), sep ="\t", quote =F)
+
+```
+Include the human contamination into the analysis as another metadata_feature
+```{r, results="hide"}
+conta <- read.table(here::here("input/uganda_human_contamination_per_sample_in_percent_for_till.txt"), sep ="\t", row.names = 1, header = T)
+## add column with mean for forward and backward reads
+conta$mean <- (conta$r1.matched + conta$r2.matched)/2
+
+row.names(conta) <- sub(pattern  = "P0.-", replacement ="", rownames(conta))
+row.names(conta) <- sub(pattern  = "-", replacement =".", rownames(conta))
+
+# use metadata_revison 
+metadata <- metadata_revison[order(rownames(metadata_revison)), ]
+md_metadeconf <- metadata[, -c(1:2)]
+# with out contamination
+md_wo_conta <- metadata
+row.names(md_wo_conta) <- sub(pattern  = "-", replacement =".", rownames(md_wo_conta))
+
+md_metadeconf <- merge(md_metadeconf, conta, by = 0) # this is where we merge the contamination into the metadata
+row.names(md_metadeconf) <- md_metadeconf$Row.names
+md_metadeconf$Row.names <- NULL
+md_metadeconf$r1.matched <- NULL
+md_metadeconf$r2.matched <- NULL
+```
+
+Metadeconfounde: update packages Feb. 2022 version 0.2.9
+```{r include=FALSE, results="hide"}
+features_genus <- genus_table[order(rownames(genus_table)), ]
+features_genus <- as.data.frame(t(features_genus))
+# more reduction, low abundace features removed
+dim(features_genus)
+ad.index.keep <- which(colSums(features_genus)*100/(sum(features_genus)) > 0.01)
+features_genus <- features_genus[, ad.index.keep]
+dim(features_genus)
+
+features_genus[order(rownames(features_genus)), ]
+md_wo_conta[order(rownames(md_wo_conta)), ]
+
+md_wo_conta$DualStatus[md_wo_conta$DualStatus == "COPD+/HIV+"] <- 1
+md_wo_conta$DualStatus[md_wo_conta$DualStatus != 1] <- 0
+md_wo_conta$DualStatus <- as.numeric(md_wo_conta$DualStatus)
+# md_wo_conta <- md_wo_conta[, !(colnames(md_wo_conta) %in% c("richness", "shannon", "simpson", "chao1", "inv.simpson", "eveness"))]
+
+# features_genus <- features_genus[rownames(features_genus) %in% rownames(md_wo_conta),]
+# meta_output_genus_rar <- MetaDeconfound(featureMat = features_genus , 
+#                                    metaMat = md_wo_conta, nnodes = 4, 
+#                                    logfile = here::here("intermediate", "MetadeconfoundR_modules.log")) # only the naive testing is # startStop = "naiveStop" 
+# y <- BuildHeatmap(meta_output_genus_rar, keepMeta = c("copd", "DualStatus"))
+ # for medication was controlled.
+```
+
+This is a specific feature to account for rarefication
+```{r eval=FALSE, include=FALSE, results="hide"}
+load(file = "~/Dropbox/Uganda_secondRevision/intermediate/meta_output_genus_rar.r")
+
+# done not the modeling. The modeling will be done with the non raref. data
+## Take the output of the first run as input for the second
+## load the unraref. genus 
+features_genus_nr <- read.table(here::here("input", "Lotus2_Uganda_SLV138","higherLvl", "Genus_cleaned.txt"), header = T, sep = "\t")
+# Remove non bacteria 
+features_genus_nr <- features_genus_nr[grep(patter= "Bacteria",x = features_genus_nr$Genus), ]
+
+rownames(features_genus_nr) <- make.names(features_genus_nr$Genus, unique = TRUE)
+features_genus_nr$Genus <- NULL
+#remove names of genus
+
+# Archaea.Halobacterota.Methanosarcinia.Methanosa..-> to short
+features_genus_nr_p <- as.data.frame(row.names(features_genus_nr))
+colnames(features_genus_nr_p) <- "long_names"
+pretty_names_nr <- tidyr::separate(features_genus_nr_p, 
+                long_names, into = c("A", "B", "C", "D", "E", "F"), 
+                sep = "\\.", fill = "right", 
+                extra = "drop")
+features_genus_nr <- as.data.frame(features_genus_nr) #genus_table was integr
+features_genus_nr$short <- pretty_names_nr$F
+row.names(features_genus_nr) <- make.names(features_genus_nr$short, unique = T) #overcome duplicate row.names are not allowed 
+features_genus_nr$short <- NULL
+features_genus_nr=features_genus_nr/min(features_genus_nr[features_genus_nr>0])
+
+features_genus_nr <- as.data.frame(t(features_genus_nr))
+# features nr must have same number of variables as the features used in the previous metadeconfR run.
+features_genus_nr <- features_genus_nr[, colnames(features_genus_nr) %in% colnames(features_genus)]
+features_genus_nr[order(rownames(features_genus_nr)), ]
+
+features_genus_nr <- features_genus_nr[rownames(features_genus_nr) %in% rownames(md_wo_conta),]
+md_wo_conta <- md_wo_conta[rownames(md_wo_conta) %in% rownames(features_genus_nr),]
+# this new features_genus_nr will be used as featureMat
+#  use p and d values from the previous created run as input
+meta_output_genus_all <- MetaDeconfound(featureMat = features_genus_nr , 
+                                   metaMat = md_wo_conta, nnodes = 4, 
+                                   logfile = here::here("intermediate", "MetadeconfoundR_all.log"),
+                                   QValues = meta_output_genus_rar$Qs, DValues = meta_output_genus_rar$Ds, 
+                                   rawCounts = T) # only the naive testing is 
+# done not the modeling. The modeling will be done with the non raref. data
+# make nice names for the metadeconfR output 
+nice_meta_names <- as.data.frame(colnames(md_wo_conta))
+# write.table(nice_meta_names, file = "~/Dropbox/Uganda_secondRevision/intermediate/nice_meta_names.tsv", sep = "\t", quote = F)
+
+nice_names_meta <- read.table("~/Dropbox/Uganda_secondRevision/intermediate/nice_meta_names.tsv", sep = "\t", header = T) 
+ x <- metadeconfoundR::BuildHeatmap(meta_output_genus_all,
+                   d_col = c("blue", "white", "red"),
+                   d_range = "full", metaVariableNames = nice_names_meta)
+ x_1 <- x +
+  theme(axis.text.y = element_text(face ="italic"))
+
+```
+For the revision we will run the metadeconfounder with the cleaned data
+```{r include=FALSE}
+load(file = "~/Dropbox/Uganda_secondRevision/input/feature_genus_rar.r")
+
+feature_genus_rar <- feature_genus_rar[order(rownames(feature_genus_rar)), ]
+md_wo_conta <- md_wo_conta[order(rownames(md_wo_conta)), ]
+
+feature_genus_rar <- feature_genus_rar[rownames(feature_genus_rar) %in% rownames(md_wo_conta),]
+
+md_wo_conta <- md_wo_conta[rownames(md_wo_conta) %in% rownames(feature_genus_rar),]
+
+# meta_output_genus_rar <-
+#   metadeconfoundR::MetaDeconfound(featureMat = feature_genus_rar ,
+#     metaMat = md_wo_conta,
+#     nnodes = 4,
+#     logfile = here::here("intermediate", "MetadeconfoundR_all_rar.log"))
+
+load(file = "~/Dropbox/Uganda_secondRevision/input/meta_output_genus_rar.r")
+
+nice_names_meta <- read.table("~/Dropbox/Uganda_secondRevision/intermediate/nice_meta_names.tsv", sep = "\t", header = T) 
+
+xwomean_sds <- metadeconfoundR::BuildHeatmap(meta_output_genus_rar,
+                   d_col = c("blue", "white", "red"),
+                   d_range = "full", metaVariableNames = nice_names_meta, keepMeta = c("Septrin", "Dapsone"))
+# force to keep prophylactic drugs for the reviewer
+
+xwomean_1sds <- xwomean_sds +
+  theme(axis.text.y = element_text(face ="italic"))
+
+```
+
+compare the two metadeconfoundR runs 
+```{r}
+load(file = "~/Dropbox/Uganda_secondRevision/input/meta_output_genus_all.r")
+r <- as.data.frame(summary(as.factor(meta_output_genus_rar$status)))
+ur <- as.data.frame(summary(as.factor(meta_output_genus_all$status)))
+rur <- merge(ur, r, by= 0, all = T)
+row.names(rur) <- rur$Row.names
+rur$Row.names <- NULL
+ colnames(rur) <- c("new_approach_non_rare", "conservativ_apporach_rare")
+
+write.table(rur, file = "~/Dropbox/Uganda_secondRevision/output/comapring_metadR_output_rare_non_rare.tsv", sep ="\t", quote = F)
+
+```
+Include staff into the metadataframe for the metadeconfoundR, use the rarefied data 
+
+
+Prepare files for picrust 
+we will run Picrust on the rarefied OTUs, however if you run the script you need to be aware of the extra column in OTU_rarefied. This has to be corrected by hand. Additionally, we have to change the names for the OTUs from "rarefied" to "OTU"
+```{r, results="hide"}
+picrust_ugly <- read.table(here::here("input/Lotus2_Uganda_SLV138/picrust/pred_metagenome_unstrat.tsv"), sep ="\t", header =T, row.names =1)
+##remove total zero abundance rows, meaning per feature
+picrust_u <- picrust_ugly[rowSums(picrust_ugly) > 0,] 
+
+
+## read the Sofia_pretty_modules
+KO_modules <- read.table(here::here("input/Lotus2_Uganda_SLV138/picrust/binning/module_rarefied.filtered.r"), sep ="\t", header =T, row.names =1)
+# picrust should be normalized # normalise, devide by rowsums  
+relPicrust <- as.data.frame(t(KO_modules))
+relPicrust <- relPicrust/rowSums(relPicrust) # per sample ==1
+
+# reduce to only Ugandian samples 
+relPicrust_u <- relPicrust[rownames(relPicrust) %in% rownames(metadata_revison), ]
+
+```
+Prepare the piCrust data -> take 10% KEGGs with most variance
+```{r}
+ad.index.keep <- which(colSums(relPicrust_u)*100/(sum(relPicrust_u)) > 0.01)
+relPicrust_u <- relPicrust_u[, ad.index.keep]
+relPicrust_u<- relPicrust_u[order(rownames(relPicrust_u)), ]
+relPicrust_u <- relPicrust_u[rownames(relPicrust_u) %in% rownames(md_metadeconf), ]
+
+namesVarRel <- names(sort(apply(relPicrust_u, MARGIN = 2, function(x) sd(x)/mean(x)), decreasing = T)[1:(ncol(relPicrust_u)/10)]) # takes the standard variation and than the 65 with the highest variations -> ONLY 10%
+#namesVarRel_1 <- namesVarRel
+mgPicrustHighVarRel <- relPicrust_u[, namesVarRel]
+```
+run metadeconfR
+```{r}
+mgPicrustHighVarRel<- mgPicrustHighVarRel[order(rownames(mgPicrustHighVarRel)), ]
+## md without contamination variable -> if we want to see the contamination effect use md_metadeconf
+md_metadeconf_wo_conta <- md_wo_conta
+md_metadeconf_wo_conta<- md_metadeconf_wo_conta[order(rownames(md_metadeconf_wo_conta)), ]
+mgPicrustHighVarRel <- mgPicrustHighVarRel[rownames(mgPicrustHighVarRel) %in% rownames(md_metadeconf_wo_conta), ]
+
+mod_names1 <- read.table(here::here("input/Lotus2_Uganda_SLV138/picrust/binning/module.defs"), fill = TRUE, sep = "\t", quote = "")
+mod_names2 <- read.table(here::here("input/Lotus2_Uganda_SLV138/picrust/binning/module.gmm.defs"), fill = TRUE, sep = "\t", quote = "")
+module_names <- rbind(mod_names1[, c(1,2)], mod_names2[, c(1,2)])
+colnames(module_names) <- c("short", "long")
+
+# meta_output_woConta_KO <- metadeconfoundR::MetaDeconfound(featureMat = mgPicrustHighVarRel , 
+#                                    metaMat = md_wo_conta, nnodes = 4, 
+#                                    logfile = here::here("intermediate", "MetadeconfoundR_wo_conta_piCr.log"))
+# save the output
+# save(meta_output_woConta_KO, file ="~/Dropbox/Uganda_secondRevision/input/meta_output_woConta_KO.r")
+load("~/Dropbox/Uganda_secondRevision/input/meta_output_woConta_KO.r")
+
+existing_modules <- module_names[module_names[, 1] %in% rownames(meta_output_woConta_KO$status), ]
+longNames <- merge(x = meta_output_woConta_KO$Ps, y = existing_modules, by.x = 0, by.y = 1) # names are now in longNames$V2
+# longNames$long <- make.names(longNames$long, unique = TRUE)
+### assigning weird long rownmaes leads to errors in buildHeatmap()
+rownames(meta_output_woConta_KO$Ps) <- longNames$long
+rownames(meta_output_woConta_KO$Qs) <- longNames$long
+rownames(meta_output_woConta_KO$Ds) <- longNames$long
+rownames(meta_output_woConta_KO$status) <- longNames$long
+
+## longFormat to get the excate qvalues
+# meta_output_woConta_KO_long <- metadeconfoundR::MetaDeconfound(featureMat = mgPicrustHighVarRel , 
+#                                    metaMat = md_metadeconf_wo_mean, nnodes = 4, returnLong = T,
+#                                    logfile = here::here("intermediate", "MetadeconfoundR_wo_conta_piCr_long.log"))
+
+# save(meta_output_woConta_KO_long, file =here::here("input", "meta_output_woConta_KO_long.r"))
+load("~/Dropbox/Uganda_secondRevision/input/meta_output_woConta_KO_long.r")
+
+load(file =here::here("input", "meta_output_woConta_KO.r"))
+
+colnames(meta_output_woConta_KO_long) <- c("short", "metaVariable", "Ps", "Qs", "Ds", "status")
+
+existing_modules <- module_names[module_names$short %in% meta_output_woConta_KO_long$short, ]
+
+longNames <- merge(x = meta_output_woConta_KO_long, y = existing_modules, by = "short") # names are now in longNames$V2
+# longNames$long <- make.names(longNames$long, unique = TRUE)
+### assigning weird long rownmaes leads to errors in buildHeatmap()
+
+meta_output_woConta_KO_long <- longNames
+write.table(meta_output_woConta_KO_long, file = "~/Dropbox/Uganda_secondRevision/metadecofR_long/Picrust_long.tsv", sep = "\t", quote = F)
+
+
+
+```
+Buildheatmap
+```{r}
+KO <- metadeconfoundR::BuildHeatmap(meta_output_woConta_KO, 
+                   d_col = c("blue", "white", "red"),
+                   d_range = "full", metaVariableNames = nice_names_meta)
+KO1 <- KO +
+  theme(axis.text.y = element_text(face ="italic"))
+```
+
+
+Include the count for Staphylococcus into the metadata to check for multidrug 
+```{r}
+md_woconta_staph <- md_wo_conta
+feature_genus_rar[order(rownames(feature_genus_rar)), ] <- feature_genus_rar[order(rownames(feature_genus_rar)), ]
+md_woconta_staph <- md_woconta_staph[order(rownames(md_woconta_staph)), ]
+
+md_woconta_staph$Staph <- feature_genus_rar$unknown_Staphylococcales
+
+# meta_stap <- as.data.frame(colnames(md_woconta_staph))
+# write.table(meta_stap, file = "~/Dropbox/Uganda_secondRevision/intermediate/meta_stap.tsv", sep = "\t", quote = F)
+meta_stap <- read.table(file = "~/Dropbox/Uganda_secondRevision/intermediate/meta_stap.tsv", sep = "\t", header = T)
+# meta_output_woConta_KO_staph <- metadeconfoundR::MetaDeconfound(featureMat = mgPicrustHighVarRel , 
+#                                    metaMat = md_woconta_staph, nnodes = 4, 
+#                                    logfile = here::here("intermediate", "MetadeconfoundR_wo_conta_piCr.log"))
+
+# save(meta_output_woConta_KO_staph, file = "~/Dropbox/Uganda_secondRevision/input/meta_output_woConta_KO_staph.r")
+load(file = "~/Dropbox/Uganda_secondRevision/input/meta_output_woConta_KO_staph.r")
+longNames_stap <- merge(x = meta_output_woConta_KO_staph$Ps, y = existing_modules, by.x = 0, by.y = 1) # names are now in longNames$V2
+# longNames$long <- make.names(longNames$long, unique = TRUE)
+### assigning weird long rownmaes leads to errors in buildHeatmap()
+rownames(meta_output_woConta_KO_staph$Ps) <- longNames_stap$long
+rownames(meta_output_woConta_KO_staph$Qs) <- longNames_stap$long
+rownames(meta_output_woConta_KO_staph$Ds) <- longNames_stap$long
+rownames(meta_output_woConta_KO_staph$status) <- longNames_stap$long
+
+
+KO_staph <- metadeconfoundR::BuildHeatmap(meta_output_woConta_KO_staph, 
+                   d_col = c("blue", "white", "red"),
+                   d_range = "full", keepMeta = c("Staph"))
+
+KO_staph_proph <- metadeconfoundR::BuildHeatmap(meta_output_woConta_KO_staph, 
+                   d_col = c("blue", "white", "red"),
+                   d_range = "full", keepMeta = c("Staph", "Septrin", "Dapsone"),metaVariableNames = meta_stap)
+
+KO_staph_proph_1 <- KO_staph_proph +
+  theme(axis.text.y = element_text(face ="italic"))
+```
+
+Use BURRIOT to get an deeper inside in the HIV/COPD community structure 
+http://elbo-spice.cs.tau.ac.il/shiny/burrito/
+Prepare BURRITO Input
+Prepare the data: 
+1. OTU_table from samples -> make sure that the OTUs in your table are matching the OTUs used for the piCrust prediction 
+2. Tax_table -> you get this out of the biom.file using phyloseq
+3. pred_metagenome_unstrat.tsv -> one of the outputs of piCrust 
+4. KO_predicted.tsv -> this one need to be transformed from wide to long format!
+```{r eval=FALSE, include=FALSE}
+biom <- import_biom(here::here("burrito", "OTU.biom" ))
+tax_tab <- as.data.frame(tax_table(biom)) #get tax from biom_file
+write.table(tax_tab, file = here::here("burrito", "tax_tab.tsv"), sep = "\t", quote =F)
+
+burr_otu <- read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl", "Rarefaction","OTU_rarefied_to_8278.000000_n_0.tsv"), header = T, row.names = 1, sep = "\t")
+burr_otu$Rarefied <- NULL
+
+burrito <- read.table(here::here("burrito", "KO_predicted 2.tsv"), sep ="\t", header =T, row.names =1)
+
+burr_otu <- burr_otu[rownames(burr_otu) %in% rownames(burrito), ] # making sure that the sample OTUs are matching the piCrust output
+burr_otu <- burr_otu[, colnames(burr_otu) %in% rownames(min_contamination)]
+
+burrito <- burrito[rownames(burrito) %in% rownames(burr_otu), ]
+burrito$OTU <- rownames(burrito)
+bur <- reshape2::melt(data = burrito)
+colnames(bur) <- c("OTU", "Gene", "CopyNumber")
+
+#safe the modified tabels
+write.table(burr_otu, file = here::here("burrito", "burrito_otu.tsv"), sep = "\t", quote =F)
+write.table(bur, file = here::here("burrito", "burrito_ko_long_min.tsv"), sep = "\t", quote =F)
+
+
+# KO_metagenome_smpl <- read.table(here::here("burrito", "pred_metagenome_unstrat.tsv"), sep ="\t", header = T, row.names = 1)
+# KO_meta <- as.data.frame(t(KO_metagenome_smpl))
+# KO_meta <- KO_meta[order(rownames(KO_meta)), ]
+#
+# KO_hiv_opred_unst <- KO_metagenome_smpl[, colnames(KO_metagenome_smpl) %in% rownames(meta_hiv)]
+#
+# write.table(KO_hiv_opred_unst, file = here::here("burrito", "KO_hiv_opred_unst.tsv"), sep = "\t", quote =F)
+
+## still to much samples
+## subselct samples with the least Kontamination
+contamination <- md_metadeconf[order(md_metadeconf$mean, decreasing = F), ]
+
+min_contamination <- contamination[c(1:10), ]
+
+write.table(min_contamination, file = here::here("burrito", "meta_min_contamination.tsv"), sep = "\t", quote = F)
+
+burrito_mincon_otu <- burr_otu[, colnames(burr_otu) %in% rownames(min_contamination)]
+write.table(burrito_mincon_otu, file = here::here("burrito", "burrito_mincon_otu.tsv"), sep = "\t", quote =F)
+
+KO_metagenome_smpl <- read.table(here::here("burrito", "pred_metagenome_unstrat.tsv"), sep ="\t", header = T, row.names = 1)
+
+
+KO_minc_opred_unst <- KO_metagenome_smpl[, colnames(KO_metagenome_smpl) %in% rownames(min_contamination)]
+KO_minc_opred_unst <- KO_minc_opred_unst[rownames(KO_minc_opred_unst) %in%colnames(burrito), ]
+
+write.table(KO_minc_opred_unst, file = here::here("burrito", "KO_minc_opred_unstt.tsv"), sep = "\t", quote =F)
+## something is off here, somehow the samle names not matching anymore
+```
+Run MetadeconfR on the old, not filtered samples and add the mean kontamination
+```{r eval=FALSE, include=FALSE, results="hide"}
+old_bacteria <- read.table("~/Documents/Uganda/old/Revision/raw_data/lotus_SVL138ggHITdb/higherLvl/Genus_rarefied_to_6493.000000_n_0.tsv", sep ="\t", header =T)
+old_bacteria$Rarefied <- NULL
+old_bacteria <- as.data.frame(t(old_bacteria))
+## with contamiantion use md_metadeconf as metadata input
+old_bacteria <- old_bacteria[rownames(old_bacteria) %in% rownames(md_metadeconf_wo_conta),]
+
+old_bacteria_name <- as.data.frame(t(old_bacteria))
+old_bacteria_name <- as.data.frame(row.names(old_bacteria_name))
+colnames(old_bacteria_name) <- "long_names"
+pretty_names_old <- tidyr::separate(old_bacteria_name, 
+                long_names, into = c("A", "B", "C", "D", "E", "F"), 
+                sep = "\\;", fill = "right", 
+                extra = "drop")
+pretty_names_old <- as.data.frame(pretty_names_old) #genus_table was integr
+old_bacteria <- as.data.frame(t(old_bacteria))
+old_bacteria$short <- pretty_names_old$F
+
+row.names(old_bacteria) <- make.names(old_bacteria$short, unique = T) #overcome duplicate row.names are not allowed 
+old_bacteria$short <- NULL
+old_bacteria=old_bacteria/min(old_bacteria[old_bacteria>0])
+
+old_bacteria <- as.data.frame(t(old_bacteria))
+# features nr must have same number of variables as the features used in the previous metadeconfR run.
+# eg. features_genus (200 x 113) 
+old_bacteria <- old_bacteria[, colnames(old_bacteria) %in% colnames(old_bacteria)]
+old_bacteria[order(rownames(old_bacteria)), ]
+
+old_bacteria <- old_bacteria[rownames(old_bacteria) %in% rownames(md_metadeconf_wo_conta),]
+dim(old_bacteria)
+ad.index.keep <- which(colSums(old_bacteria)*100/(sum(old_bacteria)) > 0.01)
+old_bacteria <- old_bacteria[, ad.index.keep]
+dim(old_bacteria)
+md_metadeconf_wo_conta[order(rownames(md_metadeconf_wo_conta)), ]
+
+ccc <- metadeconfoundR::MetaDeconfound(featureMat = old_bacteria , 
+                                   metaMat = md_metadeconf_wo_conta, nnodes = 4,
+                                   logfile=here::here("intermediate","MetadeconfoundR_old_all.log"))
+save(ccc, file = here::here("intermediate", "MetadeconfoundR_old_all.r"))
+BuildHeatmap(ccc,d_col = c("blue", "white", "red"),d_range = "full")
+
+```
+Correlation: alpha div - contamination 
+look at corynebacterium
+```{r}
+# merge metadata - shannon with mean variabel 
+md_alpha_conta <- merge(metadata_alpha, conta, by = 0)
+row.names(md_alpha_conta) <- md_alpha_conta$Row.names
+md_alpha_conta$Row.names <- NULL
+md_alpha_conta$mean <- (md_alpha_conta$r1.matched + md_alpha_conta$r2.matched)/2
+md_alpha_conta$r1.matched <- NULL
+md_alpha_conta$r2.matched <- NULL
+
+# scatterplot SHANNON
+md_alpha_conta$shannon <- as.numeric(md_alpha_conta$shannon)
+md_alpha_conta$mean <- as.numeric(md_alpha_conta$mean)
+md_alpha_conta %>%
+  ggplot(aes(x = shannon, y = mean)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (shannon index)") +
+ ylab("Percent humancontamination") +
+  theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_corr_alpha_conta
+
+
+#RICHNESS
+md_alpha_conta$richness <- as.numeric(md_alpha_conta$richness)
+md_alpha_conta$mean <- as.numeric(md_alpha_conta$mean)
+md_alpha_conta %>%
+  ggplot(aes(x = richness, y = mean)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness") +
+ ylab("Percent humancontamination")+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_corr_alpha_conta_r
+
+
+#EVENESS
+md_alpha_conta$eveness <- as.numeric(md_alpha_conta$eveness)
+md_alpha_conta$mean <- as.numeric(md_alpha_conta$mean)
+md_alpha_conta %>%
+  ggplot(aes(x = eveness, y = mean)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome eveness") +
+ ylab("Percent humancontamination")+
+theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_corr_alpha_conta_e
+
+
+#CHAO1
+md_alpha_conta$chao1 <- as.numeric(md_alpha_conta$chao1)
+md_alpha_conta$mean <- as.numeric(md_alpha_conta$mean)
+md_alpha_conta %>%
+  ggplot(aes(x = chao1, y = mean)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (chao1 index)") +
+ ylab("Percent humancontamination")+
+theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_corr_alpha_conta_c
+
+#SIMPSON
+md_alpha_conta$simpson <- as.numeric(md_alpha_conta$simpson)
+md_alpha_conta$mean <- as.numeric(md_alpha_conta$mean)
+md_alpha_conta %>%
+  ggplot(aes(x = simpson, y = mean)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (simpson index)") +
+ ylab("Percent humancontamination")+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01)-> scatter_corr_alpha_conta_si
+
+
+#INV.SIMPSON
+md_alpha_conta$inv.simpson <- as.numeric(md_alpha_conta$inv.simpson)
+md_alpha_conta$mean <- as.numeric(md_alpha_conta$mean)
+md_alpha_conta %>%
+  ggplot(aes(x = inv.simpson, y = mean)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (inv.simpson index)") +
+ ylab("Percent humancontamination")+
+    theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01)-> scatter_corr_alpha_conta_i
+
+
+#PIELOU
+md_alpha_conta$Pielou <- as.numeric(md_alpha_conta$Pielou)
+md_alpha_conta$mean <- as.numeric(md_alpha_conta$mean)
+md_alpha_conta %>%
+  ggplot(aes(x = Pielou, y = mean)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (pielou index)") +
+ ylab("Percent humancontamination")+
+    theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01)-> scatter_corr_alpha_conta_p
+
+
+corr_cont_alpha <- cowplot::plot_grid(scatter_corr_alpha_conta, scatter_corr_alpha_conta_r, scatter_corr_alpha_conta_e, scatter_corr_alpha_conta_c, scatter_corr_alpha_conta_si, scatter_corr_alpha_conta_i, scatter_corr_alpha_conta_p)
+```
+Shannon-div is positive correlated with the contamination 
+Cluster the sampels that have more than 5 % of contamination 
+
+```{r}
+md_corrected <- md_alpha_conta[md_alpha_conta$mean <= 5, ]
+
+row.names(md_metadeconf) <- md_metadeconf$Row.names
+md_metadeconf$Row.names <- NULL
+
+md_md_md <- md_metadeconf[, c(1:41)]
+md_md_md$PatID <- row.names(md_md_md)
+md_con <- MetaDeconfound(featureMat = conta , 
+                                   metaMat = md_md_md, nnodes = 4,
+                                   logfile = here::here("intermediate", "MetadeconfoundR_con.log"))
+metadeconfoundR::BuildHeatmap(md_con)
+
+# nadir CD4 low in HIV patients 
+```
+Boxplots codp status vs. contamination 
+```{r}
+md_alpha_rout_conta <- md_alpha_conta
+md_alpha_rout_conta$mean <- sqrt(md_alpha_rout_conta$mean)
+md_alpha_rout_conta%>% 
+  # dplyr::group_by(DualStatus)%>%
+  rstatix::wilcox_test(mean ~ copd)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "copd") -> stats_test_copd
+
+md_alpha_rout_conta %>%
+  #dplyr::group_by(Line)%>%
+  ggplot(aes(x= as.character(copd), y= mean))+
+  geom_violin(color= "black", alpha= 0.5, draw_quantiles = c(0.25, 0.5, 0.75))+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=as.character(copd), color = as.character(copd)))+
+  scale_fill_manual(values = pal.Coll)+
+  #scale_fill_npg() +
+  #scale_shape_manual(values = c(21, 24))+
+  xlab("copd status")+
+  ylab("percent human contamination")+
+  labs(caption = get_pwc_label(stats_test_copd))+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =10, angle = 90),legend.position = "bottom")+
+  stat_pvalue_manual(stats_test_copd, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                  tip.length = 0, label = "{p.adj} {p.adj.signif}")-> Ac
+Ac
+```
+
+```{r}
+
+md_alpha_rout_conta%>% 
+  # dplyr::group_by(DualStatus)%>%
+  rstatix::wilcox_test(mean ~ Hiv_test)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "copd") -> stats_test_hiv
+
+md_alpha_rout_conta %>%
+  #dplyr::group_by(Line)%>%
+  ggplot(aes(x= as.character(Hiv_test), y= mean))+
+  geom_violin(color= "black", alpha= 0.5, draw_quantiles = c(0.25, 0.5, 0.75))+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=as.character(Hiv_test), color = as.character(Hiv_test)))+
+  scale_fill_manual(values = pal.Coll)+
+  #scale_fill_npg() +
+  #scale_shape_manual(values = c(21, 24))+
+  xlab("Hiv status")+
+  ylab("percent human contamination")+
+  labs(caption = get_pwc_label(stats_test_hiv))+
+  theme_bw()+
+  theme(text = element_text(size=10), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =10, angle = 90),legend.position = "bottom")+
+  stat_pvalue_manual(stats_test_hiv, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                     tip.length = 0, label = "{p.adj} {p.adj.signif}")-> Ah
+Ah
+```
+```{r}
+AcAh <- cowplot::plot_grid(Ac, Ah)
+```
+
+scatterplot nadir CD4 -> low in HIV patients 
+```{r}
+md_alpha_conta %>%
+  ggplot(aes(x = rank(copd), y = mean)) +
+  geom_point(alpha = 0.5)->j
+# this is not working
+```
+
+```{r}
+## Linear models
+mh <- lm (data = md_alpha_conta, rank (mean) ~ copd + Hiv_test + Sex + age_n + bmi)
+mHiv <- lm (data = md_alpha_conta, rank (mean) ~ copd + Hosp_infancy + Sex + age_n + bmi)
+mCopd <- lm (data = md_alpha_conta, rank (mean) ~ Hiv_test + Sex + age_n + bmi)
+mHosp <- lm (data = md_alpha_conta, rank (mean) ~ Hiv_test + copd + Sex + age_n + bmi)
+
+pCopd <- lrtest (mh, mCopd)
+# copd significant?? likelyhood ratio test
+# pHiv <- lrtest (mh, mHiv)
+# looks not significant
+pHosp <- lrtest (mh, mHosp)
+# ## print model - adjust for multiple testing (?)
+```
+
+```{r}
+md_alpha_conta$PatID <- row.names(md_alpha_conta)
+model0 <- glmer(data = md_alpha_conta, copd ~ rank (mean) + (1|age_n) + (1|PatID), family="binomial")
+summary(model0)
+
+```
+Vulcanoplot genus
+```{r}
+# merge Qs and Ds use the rar data without the mean
+volcano_input <- meta_output_genus_rar$Ds[, c("DualStatus", "copd", "Hiv_test")]
+colnames(volcano_input) <- c("doublePosD", "copdD", "Hiv_testD")
+volcano_input <- as.data.frame(cbind(volcano_input, meta_output_genus_all$Qs[, c("DualStatus", "copd", "Hiv_test")]))
+volcano_input$detectedUnder <- "None"
+volcano_input$detectedUnder[(volcano_input$copd < 0.1)] <- "COPD"
+volcano_input$detectedUnder[(volcano_input$Hiv_test < 0.1)] <- "HIV"
+volcano_input$detectedUnder[((volcano_input$copd < 0.1) & (volcano_input$Hiv_test < 0.1))] <- "both"
+volcano_input$shape <- "normal"
+volcano_input$shape[volcano_input$DualStatus < 0.1] <- "doublePosHit"
+volcano_input$names <- rownames(volcano_input)
+
+hiv_copd_vulcano <-
+  ggplot(data = as.data.frame(volcano_input),
+         aes (x = Hiv_testD, y = copdD)) +
+  theme_classic() +
+  geom_point(
+    data = subset(volcano_input, shape == "doublePosHit"),
+    size = 4,
+    color = "black"
+  ) +
+  geom_point(aes(color = detectedUnder), size = 2.5) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  scale_color_manual(values = c("red", "grey")) +
+  geom_text_repel(
+    na.rm = TRUE,
+    data = subset(volcano_input, detectedUnder != "None" |
+                    shape != "normal"),
+    label = subset(volcano_input, detectedUnder != "None" |
+                     shape != "normal")$names,
+    force = 50,
+    fontface = "italic"
+  ) +
+  guides(
+  color = guide_legend(title = "Single Disease\nAssociation")
+  ) +
+  scale_y_continuous("Effect Size HIV", limits = c(-0.35, 0.35), breaks =c(-0.35,-0.2, 0.0, 0.2, 0.35),
+                     labels = c(-0.3,-0.2, 0.0, 0.2, 0.3)) +
+  scale_x_continuous("Effect Size COPD", limits = c(-0.35, 0.35), breaks =c(-0.3,-0.2, 0.0, 0.2, 0.3),
+                     labels = c(-0.3,-0.2, 0.0, 0.2, 0.3)) +
+  xlab ("Effect Size HIV") +
+  ylab ("Effect Size COPD")
+hiv_copd_vulcano
+```
+Vulcano plot with piCrust output 
+```{r}
+# merge Qs and Ds
+volcano_KO <- meta_output_woConta_KO$Ds[, c("DualStatus", "copd", "Hiv_test")]
+colnames(volcano_KO) <- c("doublePosD", "copdD", "Hiv_testD")
+volcano_KO <- as.data.frame(cbind(volcano_KO, meta_output_woConta_KO$Qs[, c("DualStatus", "copd", "Hiv_test")]))
+volcano_KO$detectedUnder <- "None"
+volcano_KO$detectedUnder[(volcano_KO$copd < 0.1)] <- "COPD"
+volcano_KO$detectedUnder[(volcano_KO$Hiv_test < 0.1)] <- "HIV"
+volcano_KO$detectedUnder[((volcano_KO$copd < 0.1) & (volcano_KO$Hiv_test < 0.1))] <- "both"
+volcano_KO$shape <- "normal"
+volcano_KO$shape[volcano_KO$DualStatus < 0.1] <- "doublePosHit"
+volcano_KO$names <- rownames(volcano_KO)
+hiv_copd_KO <-
+  ggplot(data = as.data.frame(volcano_KO),
+         aes (x = Hiv_testD, y = copdD)) +
+  theme_classic() +
+  geom_point(
+    data = subset(volcano_KO, shape == "doublePosHit"),
+    size = 4,
+    color = "black"
+  ) +
+  geom_point(aes(color = detectedUnder), size = 2.5) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  scale_color_manual(values = c("red", "grey")) +
+  geom_text_repel(
+    na.rm = TRUE,
+    data = subset(volcano_KO, detectedUnder != "None" |
+                    shape != "normal"),
+    label = subset(volcano_KO, detectedUnder != "None" |
+                     shape != "normal")$names,
+    force = 50,
+    fontface = "italic"
+  ) +
+  guides(
+  color = guide_legend(title = "Single Disease\nAssociation")
+  ) +
+  scale_y_continuous("Effect Size HIV", limits = c(-0.35, 0.35), breaks =c(-0.35,-0.2, 0.0, 0.2, 0.35),
+                     labels = c(-0.3,-0.2, 0.0, 0.2, 0.3)) +
+  scale_x_continuous("Effect Size COPD", limits = c(-0.35, 0.35), breaks =c(-0.3,-0.2, 0.0, 0.2, 0.3),
+                     labels = c(-0.3,-0.2, 0.0, 0.2, 0.3)) +
+  xlab ("Effect Size HIV") +
+  ylab ("Effect Size COPD")
+hiv_copd_KO
+
+```
+shannon div correlation with PreFvc PostFvc etc.
+
+```{r}
+md_pfvc <- read.table("~/Dropbox/Uganda_secondRevision/input/md_alpha_contr.tsv", sep ="\t", header = T, row.names = 1)
+# scatterplot pre_BestFVCL
+md_pfvc$shannon <- as.numeric(md_alpha_conta$shannon)
+md_pfvc$pre_BestFVCL <- as.numeric(md_pfvc$pre_BestFVCL)
+md_pfvc %>%
+  ggplot(aes(x = shannon, y = pre_BestFVCL)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (shannon index)") +
+ ylab("Pre FVC") +
+  theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_pre_Fvc
+
+# scatterplot Pre_FEV!
+md_pfvc$shannon <- as.numeric(md_alpha_conta$shannon)
+md_pfvc$pre_BestFEV1L <- as.numeric(md_pfvc$pre_BestFEV1L)
+md_pfvc %>%
+  ggplot(aes(x = shannon, y = pre_BestFEV1L)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (shannon index)") +
+ ylab("Pre FEV1") +
+  theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_pre_FEV
+
+# scatterplot ratio
+md_pfvc$shannon <- as.numeric(md_alpha_conta$shannon)
+md_pfvc$pre_FEV1_FCV_ratio <- as.numeric(md_pfvc$pre_FEV1_FCV_ratio)
+md_pfvc %>%
+  ggplot(aes(x = shannon, y = pre_FEV1_FCV_ratio)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (shannon index)") +
+ ylab("Ratio FCV/FEV1 (pre)") +
+  theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_pre_ratio
+
+# scatterplot post FCV
+md_pfvc$shannon <- as.numeric(md_alpha_conta$shannon)
+md_pfvc$Post_bestfvc <- as.numeric(md_pfvc$Post_bestfvc)
+md_pfvc %>%
+  ggplot(aes(x = shannon, y = Post_bestfvc)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (shannon index)") +
+ ylab("Post FCV") +
+  theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_post_FCV
+
+# scatterplot post FEV1
+md_pfvc$shannon <- as.numeric(md_alpha_conta$shannon)
+md_pfvc$Post_bestfev1 <- as.numeric(md_pfvc$Post_bestfev1)
+md_pfvc %>%
+  ggplot(aes(x = shannon, y = Post_bestfev1)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (shannon index)") +
+ ylab("Post FEV1") +
+  theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_post_FEV
+
+# scatterplot ratio
+md_pfvc$shannon <- as.numeric(md_alpha_conta$shannon)
+md_pfvc$post_FEV1_FCV_ratio <- as.numeric(md_pfvc$post_FEV1_FCV_ratio)
+md_pfvc %>%
+  ggplot(aes(x = post_FEV1_FCV_ratio, y = shannon)) +
+  geom_point(alpha = 0.5)+
+   geom_smooth(method=lm, linetype="dashed",
+             color="darkred")+
+ xlab("Microbiome richness (shannon index)") +
+ ylab("Ratio FCV/FEV1 (post) ") +
+  theme_bw()+
+  theme(text = element_text(size=10), axis.text.x.bottom = element_text(size =10),legend.position = "none")+
+  stat_cor(method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01) -> scatter_post_ratio
+
+scatter_moster <- cowplot::plot_grid(scatter_pre_Fvc, scatter_pre_FEV, scatter_pre_ratio, scatter_post_FCV, scatter_post_FEV, scatter_post_ratio, align = "vh")
+```
+Picrust on the UK data
+```{r eval=FALSE, include=FALSE}
+## read the Sofia_pretty_modules
+KO_modules <- read.table(here::here("input/Lotus2_Uganda_SLV138/picrust/binning/module_rarefied.filtered.r"), sep ="\t", header =T, row.names =1)
+md_uuk_metd <- read.table(file = "~/Dropbox/Uganda_secondRevision/input/md_uuk_metd.tsv", sep ="\t", header = T, row.names = 1)
+# picrust should be normalized # normalise, devide by rowsums  
+relpicrust_u <- as.data.frame(t(KO_modules))
+relpicrust_u <- relpicrust_u/rowSums(relpicrust_u) # per sample ==1
+
+md_uk <- md_uuk_metd[, - c(3:6)]
+ad.index.keep <- which(colSums(relpicrust_u)*100/(sum(relpicrust_u)) > 0.01)
+relpicrust_u <- relpicrust_u[, ad.index.keep]
+relpicrust_u<- relpicrust_u[order(rownames(relpicrust_u)), ]
+relpicrust_u <- relpicrust_u[rownames(relpicrust_u) %in% rownames(md_uk), ]
+
+namesVarRel <- names(sort(apply(relpicrust_u, MARGIN = 2, function(x) sd(x)/mean(x)), decreasing = T)[1:(ncol(relpicrust_u)/10)]) # takes the standard variation and than the 65 with the highest variations -> ONLY 10%
+#namesVarRel_1 <- namesVarRel
+mgPicrustHighVarRel_u <- relpicrust_u[, namesVarRel]
+
+meta_output_woConta_KO_u <- metadeconfoundR::MetaDeconfound(featureMat = mgPicrustHighVarRel_u ,
+                                   metaMat = md_uk, nnodes = 4,
+                                   logfile = here::here("intermediate", "MetadeconfoundR_wo_conta_piCr_u.log"))
+# save the output
+# save(meta_output_woConta_KO_u, file = "~/Dropbox/Uganda_secondRevision/input/meta_output_woConta_KO_u.r")
+
+load( file = "~/Dropbox/Uganda_secondRevision/input/meta_output_woConta_KO_u.r")
+existing_modules <- module_names[module_names[, 1] %in% rownames(meta_output_woConta_KO_u$status), ]
+longNames <- merge(x = meta_output_woConta_KO_u$Ps, y = existing_modules, by.x = 0, by.y = 1) # names are now in longNames$V2
+# longNames$long <- make.names(longNames$long, unique = TRUE)
+### assigning weird long rownmaes leads to errors in buildHeatmap()
+rownames(meta_output_woConta_KO_u$Ps) <- longNames$long
+rownames(meta_output_woConta_KO_u$Qs) <- longNames$long
+rownames(meta_output_woConta_KO_u$Ds) <- longNames$long
+rownames(meta_output_woConta_KO_u$status) <- longNames$long
+
+### check please 
+KO_uk <- metadeconfoundR::BuildHeatmap(meta_output_woConta_KO_u, 
+                   d_col = c("blue", "white", "red"),
+                   d_range = "full")
+
+```
+Different abundant taxa tables 
+
+```{r, warning = FALSE, message = FALSE}
+load(file= "~/Dropbox/Uganda_secondRevision/input/pretty_metadata_revision.r")
+md <- metadata_revison
+md <- md[!is.na(md$Hiv_test),]
+md$DualStatus <- paste (md$copd, md$Hiv_test)
+md$DualStatus <- plyr::mapvalues (md$DualStatus, from = c ("0 0", "0 1", "1 0", "1 1"), 
+                            to = c ("COPD-/HIV-", "COPD-/HIV+", "COPD+/HIV-", "COPD+/HIV+"))
+md$doublePos <- NULL
+#Phylum tranformieren
+Phylum <- read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl","Rarefaction", "Phylum_rarefied_to_8278.000000_n_0.tsv"), header = T)
+## remove Eukaryotes/Archaea
+Phylum <- Phylum[grep(patter= "Bacteria",x = Phylum$Rarefied), ]
+row.names(Phylum) <- Phylum$Rarefied
+Phylum$Rarefied <- NULL
+Phylum <- t(Phylum)
+ad.index.keep <- which(colSums(Phylum)*100/(sum(Phylum)) > 0.01) # reduce dataset 
+Phylum <- Phylum[, ad.index.keep]
+Phylum <- Phylum[order(row.names(Phylum)), ]
+md <- md[order(row.names(md)), ]
+row.names(md) <- sub(pattern  = "-", replacement =".",  rownames(md))
+# Phylum <- Phylum[order(row.names(Phylum)), ]
+# points to - hack
+# row.names(Phylum)
+# class(Phylum)
+Phylum <- as.data.frame(Phylum)
+Phylum$Smpl <- row.names(Phylum)
+Phylum <- Phylum[rownames(Phylum) %in% rownames(md),]
+md$Smpl <- row.names(md)
+md <- md[c("DualStatus", "Smpl")] # Nur status und smp,l id rausnhemen 
+Abundance <- dplyr::left_join(Phylum, md)
+Abundance$Smpl <- NULL
+
+# Phylum$Smpl <-NULL
+# Abundance gucken 
+# DualStatus in 4 Gruppen and make median
+Abundance_COPD <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV-",-ncol(Abundance)], 2, mean)
+Abundance_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV+",-ncol(Abundance)], 2, mean)
+Abundance_COPD_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV+",-ncol(Abundance)],2, mean)
+Abundance_neg <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV-",-ncol(Abundance)], 2, mean)
+#merging
+Abundance_merged <-
+  rbind(Abundance_COPD,
+        Abundance_COPD_HIV,
+        Abundance_HIV,
+        Abundance_neg)
+
+Abundance_merged <- apply(Abundance_merged, 2, function(x) round(x, digits = 2)) # use when mean 
+
+# now do the same to get the IQR 
+Abundance_COPD <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV-",-ncol(Abundance)], 2, IQR)
+Abundance_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV+",-ncol(Abundance)], 2, IQR)
+Abundance_COPD_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV+",-ncol(Abundance)],2, IQR)
+Abundance_neg <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV-",-ncol(Abundance)], 2, IQR)
+#merging
+Abundance_merged_1 <-
+  rbind(Abundance_COPD,
+        Abundance_COPD_HIV,
+        Abundance_HIV,
+        Abundance_neg)
+# now make a new datafram 
+Abundance_merged_2 <- Abundance_merged # erstelle dataframe
+for (i in 1:nrow(Abundance_merged)) {
+  Abundance_merged_2[i,] <-
+    paste0(Abundance_merged[i,], " (±", Abundance_merged_1[i,], ")")
+
+}
+
+rel_Phylum <- Abundance_merged_2
+# delete Bacteria in front of Phylum names
+colnames(rel_Phylum) <- sub("Bacteria;",  "", colnames(rel_Phylum))
+rel_Phylum <- as.data.frame(rel_Phylum)
+
+## for testing take out the 6 most abundance and save into new dataframe
+
+topabundance <- Abundance
+colnames(topabundance) <- sub("Bacteria;",  "", colnames(topabundance))
+topabundance <- topabundance[, colnames(topabundance) %in% colnames(rel_Phylum)]
+topabundance$DualStatus <- Abundance$DualStatus
+
+rel_Phylum <- rel_Phylum[, sort(colnames(rel_Phylum))]
+
+### now do some statsitical testing use pairwise wilcox on the Abundance df, with all the bacteria
+x <- vector(length = ncol(topabundance)-1, mode = "double")
+for(i in 1:(ncol(topabundance)-1)){
+  print(colnames(topabundance)[i])
+  #print(pairwise.wilcox.test(Abundance[, i], Abundance$DualStatus, p.adjust.method = "fdr"))
+  x[i] <- chisq.test(topabundance[, i], topabundance$DualStatus)$p.value
+  
+}
+x <- p.adjust(x, method = "fdr")
+rel_Phylum <- rbind(rel_Phylum, x)
+row.names(rel_Phylum)[5] <- "Chisq-test p value"
+rel_Phylum[5, ] <- round(as.numeric(rel_Phylum[5, ]), digits = 2)
+
+write.table(rel_Phylum, file = "~/Dropbox/Uganda_secondRevision/output/mean_iqr_rel_abundance_phylum.tsv",
+            sep = "\t",quote = F)
+```
+
+Do the same with the Genus 
+```{r, warning = FALSE, message = FALSE}
+
+genus <- read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl", "Rarefaction", "Genus_rarefied_to_8278.000000_n_0.tsv"), header = T, row.names = NULL, sep = "\t")
+genus$Rarefied <- NULL
+# Remove non bacteria 
+genus <- genus[grep(patter= "Bacteria",x = genus$row.names), ]
+rownames(genus) <- make.names(genus$row.names, unique = TRUE)
+genus$row.names <- NULL
+## keep all the Ugandian samples
+genus <- genus[colnames(genus) %in% rownames(md)]
+genus <- as.data.frame(t(genus))
+
+ad.index.keep <- which(colSums(genus)*100/(sum(genus)) > 0.01) # reduce dataset 
+Genus <- genus[, ad.index.keep]
+dim(Genus)
+Genus <- Genus[order(row.names(Genus)), ]
+md <- md[order(row.names(md)), ]
+
+# row.names(Genus)
+#class(Genus)
+Genus$Smpl <- row.names(Genus)
+md$Smpl <- row.names(md)
+md <- md[c("DualStatus", "Smpl")] # Nur status und smp,l id rausnhemen 
+Abundance <- left_join(Genus, md)
+Abundance$Smpl <- NULL
+
+Abundance_COPD <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV-",-ncol(Abundance)], 2, median)
+Abundance_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV+",-ncol(Abundance)], 2, median)
+Abundance_COPD_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV+",-ncol(Abundance)],2, median)
+Abundance_neg <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV-",-ncol(Abundance)], 2, median)
+#merging
+Abundance_merged <-
+  rbind(Abundance_COPD,
+        Abundance_COPD_HIV,
+        Abundance_HIV,
+        Abundance_neg)
+
+
+Abundance_COPD <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV-",-ncol(Abundance)], 2, IQR)
+Abundance_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV+",-ncol(Abundance)], 2, IQR)
+Abundance_COPD_HIV <-
+  apply(Abundance[Abundance$DualStatus == "COPD+/HIV+",-ncol(Abundance)],2, IQR)
+Abundance_neg <-
+  apply(Abundance[Abundance$DualStatus == "COPD-/HIV-",-ncol(Abundance)], 2, IQR)
+#merging
+Abundance_merged_1 <-
+  rbind(Abundance_COPD,
+        Abundance_COPD_HIV,
+        Abundance_HIV,
+        Abundance_neg)
+# now make a new datafram 
+Abundance_merged_2 <- Abundance_merged # erstelle dataframe
+for (i in 1:nrow(Abundance_merged)) {
+  Abundance_merged_2[i,] <-
+    paste0(Abundance_merged[i,], " (±", Abundance_merged_1[i,], ")")
+  
+}
+
+rel_Genus <- Abundance_merged_2
+rel_Genus <- as.data.frame(rel_Genus)
+
+rel_Genus <- rel_Genus[, sort(colnames(rel_Genus))]
+
+## for testing take out the 6 most abundance and save into new dataframe
+
+topabundance <- Abundance
+
+topabundance <- topabundance[, sort(colnames(topabundance))]
+# topabundance$DualStatus <- Abundance$DualStatus
+
+
+### now do some statsitical testing use pairwise wilcox on the Abundance df, with all the bacteria
+x <- vector(length = ncol(topabundance)-1, mode = "double")
+for(i in 1:(ncol(topabundance)-1)){
+  print(colnames(topabundance)[i])
+  #print(pairwise.wilcox.test(Abundance[, i], Abundance$DualStatus, p.adjust.method = "fdr"))
+  x[i] <- chisq.test(topabundance[, i], topabundance$DualStatus)$p.value
+  
+}
+x <- p.adjust(x, method = "fdr")
+rel_Genus <- rbind(rel_Genus, x)
+row.names(rel_Genus)[5] <- "Chisq-test p value"
+rel_Genus[5, ] <- round(as.numeric(rel_Genus[5, ]), digits = 2)
+
+write.table(rel_Genus, file = "~/Dropbox/Uganda_secondRevision/output/median_iqr_rel_abundance_genus.tsv",
+            sep = "\t",quote = F)
+
+```
+need to: community type % in each group 
+```{r}
+prop_tabel_com <- prop.table(t(table(metadata_beta$DualStatus, metadata_beta$Dirichlet_multinomial_3 )), 1)*100
+row.names(prop_tabel_com) <- c("community type 1", "community type 2", "community type 3")
+write.table(prop_tabel_com, file = "~/Dropbox/Uganda_secondRevision/output/prop_tabel_com.tsv", sep ="\t", quote = F)
+```
+mean value alpha div
+```{r}
+meta_COPD <-
+  apply(metadata_alpha[metadata_alpha$DualStatus == "COPD+/HIV-",c("shannon", "simpson", "inv.simpson", "richness", "chao1", "eveness", "Pielou") ], 2, mean)
+meta_HIV <-
+  apply(metadata_alpha[metadata_alpha$DualStatus == "COPD-/HIV+",c("shannon", "simpson", "inv.simpson", "richness", "chao1", "eveness", "Pielou") ], 2, mean)
+meta_COPD_HIV <-
+  apply(metadata_alpha[metadata_alpha$DualStatus == "COPD+/HIV+",c("shannon", "simpson", "inv.simpson", "richness", "chao1", "eveness", "Pielou") ], 2, mean)
+meta_neg <-
+  apply(metadata_alpha[metadata_alpha$DualStatus == "COPD-/HIV-",c("shannon", "simpson", "inv.simpson", "richness", "chao1", "eveness", "Pielou") ], 2, mean)
+#merging
+meta_merged <-
+  round(rbind(meta_COPD,
+        meta_COPD_HIV,
+        meta_HIV,
+        meta_neg), digits = 2)
+
+meta_COPD1 <-
+  apply(metadata_alpha[metadata_alpha$DualStatus == "COPD+/HIV-",c("shannon", "simpson", "inv.simpson", "richness", "chao1", "eveness", "Pielou") ], 2, sd)
+meta_HIV1 <-
+  apply(metadata_alpha[metadata_alpha$DualStatus == "COPD-/HIV+",c("shannon", "simpson", "inv.simpson", "richness", "chao1", "eveness", "Pielou") ], 2, sd)
+meta_COPD_HIV1 <-
+  apply(metadata_alpha[metadata_alpha$DualStatus == "COPD+/HIV+",c("shannon", "simpson", "inv.simpson", "richness", "chao1", "eveness", "Pielou") ], 2, sd)
+meta_neg1 <-
+  apply(metadata_alpha[metadata_alpha$DualStatus == "COPD-/HIV-",c("shannon", "simpson", "inv.simpson", "richness", "chao1", "eveness", "Pielou") ], 2, sd)
+#merging
+meta_merged1 <-
+  round(rbind(meta_COPD1,
+        meta_COPD_HIV1,
+        meta_HIV1,
+        meta_neg1), digits = 2)
+
+
+meta_merged_2 <- meta_merged # erstelle dataframe
+for (i in 1:nrow(meta_merged)) {
+  meta_merged_2[i,] <-
+    paste0(meta_merged[i,], " (±", meta_merged1[i,], ")")
+  
+}
+
+write.table(meta_merged_2, file = "~/Dropbox/Uganda_secondRevision/output/alpha_div_group_means.tsv", sep = "\t", quote = F)
+
+```
+raw reads for each sample 
+```{r}
+raw_reads <- read.table("~/Dropbox/Uganda_secondRevision/input/rawReadCountsPerSample.tsv.csv", sep = "\t", header = T)
+raw_reads$X.1 <- NULL
+raw_reads$X <- stringr::str_extract(raw_reads$X, pattern = "[A-Z]+[0-9]{2}-LMB[0-9]{3}")
+
+raw_reads <- raw_reads[1:400 %% 2 == 0, ]
+row.names(raw_reads) <- raw_reads$X
+raw_reads$X <- NULL
+raw_reads1 <- raw_reads[, c(1,2)]
+colnames(raw_reads1) <- c("raw reads", "after filtering")
+write.table(raw_reads1, file = "~/Dropbox/Uganda_secondRevision/output/raw_reads.tsv", sep = "\t", quote = F)
+```
+boxplots 
+
+```{r}
+row.names(raw_reads1) <- sub("-", "\\.", row.names(raw_reads1))
+raw_read_status <- merge(raw_reads1, md_Dualstatus, by = 0)
+row.names(raw_read_status) <- raw_read_status$Row.names
+raw_read_status$Row.names <- NULL
+
+## eveness
+raw_read_status$`raw reads` <-  as.numeric(raw_read_status$`raw reads`)
+raw_read_status <- raw_read_status[raw_read_status$DualStatus != "NA NA", ]
+
+raw_read_status%>% 
+  rstatix::wilcox_test(`raw reads` ~ DualStatus)%>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance()%>%
+  rstatix::add_xy_position(x = "DualStatus") -> stats_test_e
+
+##Plot 
+raw_read_status %>%
+  ggplot(aes(x= DualStatus, y= `raw reads`))+
+  geom_boxplot(color= "black", alpha= 0.5, outlier.shape=NA)+
+  geom_point(position=position_jitter(0.2), size=3,
+             aes(fill=DualStatus, color = DualStatus))+
+  scale_color_manual(values = pal.Coll)+
+  xlab("DualStatus")+
+  ylab("raw read count")+
+  labs(caption = get_pwc_label(stats_test_e))+
+  theme_bw()+
+  theme(text = element_text(size=13), axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.text.x.bottom = element_text(size =13, angle = 90),legend.position = "none")+
+  stat_pvalue_manual(stats_test_e, bracket.nudge.y = -2, step.increase = 0.05, hide.ns = T,
+                     tip.length = 0, label = "{p.adj} {p.adj.signif}")-> rawawaw
+rawawaw
+```
+
+
+
+

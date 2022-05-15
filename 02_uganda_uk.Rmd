@@ -1,0 +1,1076 @@
+---
+title: "02_uganda_uk"
+author: "Theda Bartolomaeus and Till Birkner"
+date: "2/17/2022"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy.opts=list(width.cutoff=80), tidy=TRUE)
+```
+
+Dataset from Uganda + UK cohort, processed and rarefied together (Lotus and RTK) Lotus pipline 2 -\> SVL138 load packages
+
+```{r echo=TRUE, message=FALSE, results = FALSE}
+# Both dataset have been preprocessed together 
+library(DirichletMultinomial)
+library(reshape2)
+library(magrittr)
+library(dplyr)
+library(cowplot)
+library(ggrepel)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(vegan)
+library(lattice)
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+library(egg)
+```
+
+Community typing will be performed in the merged UK + Uganda dataset
+
+```{r}
+OTU_uuk <-
+  read.table(
+    here::here(
+      "input",
+      "Lotus2_Uganda_SLV138",
+      "higherLvl",
+      "Rarefaction",
+      "OTU_rarefied_to_8278.000000_n_0.tsv"
+    ),
+    sep = "\t",
+    row.names = 1,
+    header = T
+  )
+OTU_uuk$Rarefied <- NULL
+md_uk <-
+  read.table(
+    here::here("input", "Metadata_UK_HIV.csv"),
+    sep = ",",
+    header = T,
+    row.names = 1
+  )
+md_com <- md_uk[c(24, 28)] # select only hiv_status and geo_loc
+colnames(md_com)[which(names(md_com) == "geo_loc_name_country_continent")] <-
+  "geo_loc"
+colnames(md_com)[which(names(md_com) == "host_hiv_status")] <-
+  "Hiv_test"
+load(here::here("input", "pretty_metadata_revision.r"))
+### load metadata of both studies
+metadata_Uganda <- metadata_revison
+metadata_Uganda$geo_loc <- "Uganda"
+metadata_Uganda <- metadata_Uganda[c(12, 42)]
+colnames(metadata_Uganda)[which(names(metadata_Uganda) == "hiv_status")] <-
+  "Hiv_test"
+# metadata_Uganda <- metadata_Uganda[c(12,40)]
+### now use cbind to bind both metadataframe
+metadata_comb <- rbind(metadata_Uganda, md_com)
+metadata_comb$Hiv_test[metadata_comb$Hiv_test == "No"] <- 0
+metadata_comb$Hiv_test[metadata_comb$Hiv_test == "Yes"] <- 1
+rownames(metadata_comb) <- sub("\\-", ".", rownames(metadata_comb))
+
+```
+
+```{r}
+genus_uuk <-
+  read.table(
+    here::here(
+      "input",
+      "Lotus2_Uganda_SLV138",
+      "higherLvl",
+      "Rarefaction",
+      "Genus_rarefied_to_8278.000000_n_0.tsv"
+    ),
+    sep = "\t",
+    row.names = NULL
+  )
+
+# Remove non bacteria
+genus_uuk <-
+  genus_uuk[grep(patter = "Bacteria", x = genus_uuk$row.names),]
+genus_uuk$Rarefied <- NULL
+rownames(genus_uuk) <-
+  make.names(genus_uuk$row.names, unique = TRUE)
+genus_uuk$row.names <- NULL
+#remove names of genus
+raw_v <- as.data.frame(t(genus_uuk))
+## Remove columnsum = 0
+raw_v <- raw_v[, colSums(raw_v) > 0]
+raw_v_t <- as.data.frame(t(raw_v))
+#Note that genus_table, columns are samples and rows are genus
+genus_table_uuk <- raw_v_t
+dim(genus_table_uuk)# subset the data, genus_lvl count table (no proportion table)
+head(colnames(genus_table_uuk)) #colnames should be samples
+head(row.names(genus_table_uuk)) #rownames should be genus
+# use the stringsplit function to get proper genus names:
+# Archaea.Halobacterota.Methanosarcinia.Methanosa..-> to short
+genus_puk <- as.data.frame(row.names(genus_table_uuk))
+colnames(genus_puk) <- "long_names"
+pretty_names_uuk <- tidyr::separate(
+  genus_puk,
+  long_names,
+  into = c("A", "B", "C", "D", "E", "F"),
+  sep = "\\.",
+  fill = "right",
+  extra = "drop"
+)
+write.table(pretty_names_uuk,
+            here::here("output", "genus_names_pretty_uuk.tsv"))
+
+# add short names to genus_table
+genus_table_uuk <-
+  as.data.frame(genus_table_uuk) #genus_table was integr
+genus_table_uuk$short <- pretty_names_uuk$F
+row.names(genus_table_uuk) <-
+  make.names(genus_table_uuk$short, unique = T) #overcome duplicate row.names are not allowed
+genus_table_uuk$short <- NULL
+genus_table_uuk = genus_table_uuk / min(genus_table_uuk[genus_table_uuk >
+                                                          0])
+
+# Fit dirichlet multinomial model
+all_dmns = 6 #max dirichlets to check for minimum information criteria
+if (!file.exists(here::here("output", "dmn_list_uganda_uk.tsv"))) {
+  dmn_list = numeric(all_dmns)
+  for (i in 1:all_dmns) {
+    print(i)
+    assign(paste0("dmn_", i), dmn(as.matrix(t(
+      genus_table_uuk
+    )), i, verbose = F))
+  }
+  dmn_list = list(dmn_1, dmn_2, dmn_3, dmn_4, dmn_5, dmn_6)
+  save(dmn_list, file = here::here("output", "dmn_list_uganda_uk.tsv"))
+} else {
+  load(here::here("output", "dmn_list_uganda_uk.tsv"))
+  print("loaded dmn_list from saved file!")
+}
+
+lplc <- sapply(dmn_list, laplace)
+plot(lplc,
+     type = "b",
+     xlab = "Number of Dirichlet Components",
+     ylab = "Model Fit")
+# best fit ist 5 The best fit is for k = 5distinct Dirichletcomponents.
+#save clusters / metacommunities
+Dirichlet_multinomial_1 = mixture(dmn_list[[1]], assign = TRUE)
+Dirichlet_multinomial_2 = mixture(dmn_list[[2]], assign = TRUE)
+Dirichlet_multinomial_3 = mixture(dmn_list[[3]], assign = TRUE)
+Dirichlet_multinomial_4 = mixture(dmn_list[[4]], assign = TRUE)
+Dirichlet_multinomial_5 = mixture(dmn_list[[5]], assign = TRUE)
+Dirichlet_multinomial_6 = mixture(dmn_list[[6]], assign = TRUE)
+
+Dirichlet_multinomial_all = data.frame(
+  cbind(
+    Dirichlet_multinomial_1,
+    Dirichlet_multinomial_2,
+    Dirichlet_multinomial_3,
+    Dirichlet_multinomial_4,
+    Dirichlet_multinomial_5,
+    Dirichlet_multinomial_6
+  )
+)
+colnames(Dirichlet_multinomial_all) = c("DMM_k=1",
+                                        "DMM_k=2",
+                                        "DMM_k=3",
+                                        "DMM_k=4",
+                                        "DMM_k=5",
+                                        "DMM_k=6")
+
+# minimum information criteria
+lplc <- sapply(dmn_list, laplace)
+BIC <- sapply(dmn_list, BIC)
+AIC <- sapply(dmn_list, AIC)
+dmn_list[[which.min(lplc)]] # optimal number of metacommunities (Laplace information criterion)
+dmn_list[[which.min(BIC)]] # optimal number of metacommunities (Bayesian information criterion)
+dmn_list[[which.min(AIC)]]# optimal number of metacommunities (Akaike information criterion)
+
+# plot information criteria
+plot(
+  lplc,
+  type = "b",
+  xlab = "Number of Dirichlet Components",
+  ylab = "Model Fit, Laplace",
+  main = "Model fit as a function of Dirichlet component number"
+)
+# k = 4
+plot(
+  BIC,
+  type = "b",
+  xlab = "Number of Dirichlet Components",
+  ylab = "Model Fit, BIC",
+  main = "Model fit as a function of Dirichlet component number"
+)
+# K = 2
+plot(
+  AIC,
+  type = "b",
+  xlab = "Number of Dirichlet Components",
+  ylab = "Model Fit, AIC",
+  main = "Model fit as a function of Dirichlet component number"
+)
+# k = 2
+```
+
+```{r}
+fit <- dmn_list
+#best <- fit[[which.min(unlist(lplc))]] # proper way to do this
+best <-
+  fit[[4]] # manually set t 4 clusters to be socistent between differet pre-processing pipelines
+#### so we want to get the weights of influence on the models from the different genera:
+## relative abundance = contribution to each pulmotype(?)
+cluster_imp_u <- fitted(best)
+
+p1 <-
+  fitted(fit[[1]], scale = TRUE)# vergleich gegen das model wo alles in einem
+# gefittet ist
+p5 <- fitted(best, scale = TRUE)
+
+meandiff <- colSums(abs(p5 - as.vector(p1)))
+meandiff
+x <- mixture(best)
+
+### plot the pulmotypes
+plot_list = list()
+for (k in seq(ncol(fitted(best)))) {
+  d <- melt(fitted(best))
+  colnames(d) <- c("OTU", "cluster", "value")
+  d <- subset(d, cluster == k) %>%
+    # Arrange OTUs by assignment strength
+    arrange(value) %>%
+    mutate(OTU = factor(OTU, levels = unique(OTU))) %>%
+    # Only show the most important drivers
+    filter(abs(value) > quantile(abs(value), 0.8))
+  
+  gg_color_hue <- function(n) {
+    hues = seq(15, 375, length = n + 1)
+    hcl(h = hues, l = 65, c = 100)[1:n]
+  }
+  cols = gg_color_hue(4)
+  
+  p <- ggplot (d [(length(d$value) - 10):length(d$value),],
+               aes(x = OTU , y = value)) +
+    xlab("") +
+    ylab("contribution to cluster") +
+    geom_bar(stat = "identity",
+             fill = cols[k],
+             colour = "black") +
+    coord_flip() +
+    theme_classic() +
+    theme(
+      axis.text.y = element_text(face = "italic"),
+      axis.text = element_text(size = 13, face = 'bold'),
+      axis.title = element_text(size = 15, face = 'bold')
+    )
+  
+  
+  plot_list[[k]] = p
+  print(paste0("Cluster importance plot done for cluster", k))
+}
+
+plot <- plot_grid(plot_list[[1]],
+                  plot_list[[2]],
+                  plot_list[[3]],
+                  plot_list[[4]],
+                  nrow = 2,
+                  align = "vh")
+
+print(length(plot_list))
+# plot <- egg::ggarrange(plot_list[[1]], plot_list[[2]],
+#                    plot_list[[3]],plot_list[[4]], 
+#                    nrow = 2)
+plot
+```
+
+
+changes the plots so they fit the figure structure 
+```{r}
+# use genus_table from community typing
+genus_community <- as.data.frame(t(genus_table_uuk))
+# reduce the dataset
+
+# TB changed 3033_05_13
+cluster_result_uuk <- as.data.frame(Dirichlet_multinomial_4)
+# end change
+ad.index.keep <- which(colSums(genus_community)*100/(sum(genus_community)) > 0.01) 
+genus_community <- genus_community[, ad.index.keep]
+dim(genus_community)
+order(row.names(genus_community))
+genus_community <- as.data.frame(genus_community)
+genus_community$Smpl <- row.names(genus_community)
+genus_community <- genus_community[rownames(genus_community) %in% rownames(metadata_comb),]
+cluster_abundance <- merge(genus_community, cluster_result_uuk, by = 0)
+row.names(cluster_abundance) <- cluster_abundance$Row.names
+cluster_abundance$Row.names <- NULL
+cluster_abundance$Smpl <- NULL
+
+# MEDIAN
+cluster_abundance_1_u <-
+  apply(cluster_abundance[cluster_abundance$Dirichlet_multinomial_4 == "1",-ncol(cluster_abundance)], 2, mean)
+cluster_abundance_2_u <-
+ apply(cluster_abundance[cluster_abundance$Dirichlet_multinomial_4 == "2",-ncol(cluster_abundance)], 2, mean)
+cluster_abundance_3_u <-
+ apply(cluster_abundance[cluster_abundance$Dirichlet_multinomial_4 == "3",-ncol(cluster_abundance)], 2, mean)
+cluster_abundance_4_u <-
+ apply(cluster_abundance[cluster_abundance$Dirichlet_multinomial_4 == "4",-ncol(cluster_abundance)], 2, mean)
+
+# merging
+cluster_merged_u <-
+  rbind(cluster_abundance_1_u,
+        cluster_abundance_2_u,
+        cluster_abundance_3_u,
+        cluster_abundance_4_u)
+
+
+## Plot the Abundance 
+cluster_rel_u <- cluster_merged_u
+cluster_rel_u <- as.data.frame(t(cluster_merged_u))
+cluster_rel_u <- apply(cluster_merged_u, 1, function(x) x/sum(x)) # rows 1 als prozente
+
+## use cluster_imp 
+clr_u <- cluster_rel_u
+clr_import_u <- merge(clr_u, cluster_imp_u, by = 0)
+row.names(clr_import_u) <- clr_import_u$Row.names
+clr_import_u$Row.names <- NULL
+
+
+# use the clr_import
+ru1 <- clr_import_u [, c(1,5)]
+ru1 <- ru1[order(ru1$V1, decreasing = TRUE)[1:11],]
+ru1$Genus <- row.names(ru1)
+
+ru1 %>%
+  mutate(Genus = fct_reorder(Genus, cluster_abundance_1_u)) %>%
+  ggplot (aes(x = Genus, y = V1, fill = "tomato2"))+
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = round(cluster_abundance_1_u, digits = 3)), position = "dodge") +
+  theme_classic() +
+  coord_flip()+
+   theme(axis.text.x = element_text(),
+         axis.title.y = element_blank(),
+        axis.text.y = element_text(face = "italic"),
+        legend.position = "none") +
+  ylab("cluster importance") -> rcomu1
+
+rcomu1
+```
+
+```{r}
+ru2 <- clr_import_u [, c(2,6)]
+ru2 <- ru2[order(ru2$V2, decreasing = TRUE)[1:11],]
+ru2$Genus <- row.names(ru2)
+
+ru2 %>%
+  mutate(Genus = fct_reorder(Genus, cluster_abundance_2_u)) %>%
+  ggplot (aes(x = Genus, y = V2))+
+  geom_bar(position="dodge", stat = "identity", color = "black", fill ="chartreuse3") +
+  geom_text(aes(label = round(cluster_abundance_2_u, digits = 3)), position = "dodge")+
+  theme_classic() +
+  coord_flip()+
+   theme(axis.text.x = element_text(),
+         axis.title.y = element_blank(),
+        axis.text.y = element_text(face = "italic"),
+        legend.position = "none") +
+  ylab("cluster importance") -> rcomU2
+rcomU2
+```
+
+```{r}
+ru3 <- clr_import_u [, c(3,7)]
+ru3 <- ru3[order(ru3$V3, decreasing = TRUE)[1:11],]
+ru3$Genus <- row.names(ru3)
+
+ru3 %>%
+  mutate(Genus = fct_reorder(Genus, cluster_abundance_3_u)) %>%
+  ggplot (aes(x = Genus, y = V3))+
+  geom_bar(position="dodge", stat = "identity", color = "black", fill ="deepskyblue2") +
+  geom_text(aes(label = round(cluster_abundance_3_u, digits = 3)), position = "dodge")+
+  theme_classic() +
+  coord_flip()+
+   theme(axis.text.x = element_text(),
+         axis.title.y = element_blank(),
+        axis.text.y = element_text(face = "italic"),
+        legend.position = "none") +
+  ylab("cluster importance") -> rcomU3
+rcomU3
+```
+
+```{r}
+ru4 <- clr_import_u [, c(4,8)]
+ru4 <- ru4[order(ru4$V4, decreasing = TRUE)[1:11],]
+ru4$Genus <- row.names(ru4)
+
+ru4%>%
+  mutate(Genus = fct_reorder(Genus, cluster_abundance_4_u)) %>%
+  ggplot (aes(x = Genus, y = V4))+
+  geom_bar(position="dodge", stat = "identity", color = "black", fill ="purple") +
+  geom_text(aes(label = round(cluster_abundance_4_u, digits = 3)), position = "dodge")+
+  theme_classic() +
+  coord_flip()+
+   theme(axis.text.x = element_text(),
+         axis.title.y = element_blank(),
+        axis.text.y = element_text(face = "italic"),
+        legend.position = "none") +
+  ylab("cluster importance") -> rcomU4
+rcomU4
+```
+```{r}
+rcomcomu <- cowplot::plot_grid(rcomu1, rcomU2, rcomU3,  rcomU4)
+rcomcomu
+```
+
+bray-curtis dissimilarity UK vs Uganda colored according to their community type
+
+```{r}
+ComColu <- c("chartreuse3", "deepskyblue2", "red3", "purple")
+
+cluster_result_uuk <- as.data.frame(Dirichlet_multinomial_4)
+#Plot the Beta diversity colored for the different Clusters
+
+md_uuk_com <- merge(metadata_comb, cluster_result_uuk, by = 0)
+row.names(md_uuk_com) <- md_uuk_com$Row.names
+md_uuk_com$Row.names <- NULL
+# change the colnames, since they got a little messy
+md_uuk_com$Dirichlet_multinomial_4 <-
+  as.character(md_uuk_com$Dirichlet_multinomial_4)
+#do pcoa
+beta_uuk <- vegdist (t(OTU_uuk), method = "bray", na.rm = T)
+## now we change the NAs to 0, since there is no diffrence between the samples
+beta_uuk[is.na(beta_uuk)] <- 0
+pcoaE <- cmdscale (beta_uuk, k = 2)
+pcoaE <- as.data.frame(pcoaE)
+head(pcoaE)
+
+md_uuk_com <- merge(md_uuk_com, pcoaE, by = 0)
+row.names(md_uuk_com) <- md_uuk_com$Row.names
+md_uuk_com$Row.names <- NULL
+md_uuk_com <- as.data.frame(md_uuk_com)
+
+# prepare the plot
+centroids <-
+  aggregate(cbind(V1, V2) ~ Dirichlet_multinomial_4, md_uuk_com, mean)
+md_uuk_com %>%
+  ggplot (aes (x = V1, y = V2, color = Dirichlet_multinomial_4)) +
+  theme_classic () +
+  geom_point (
+    aes (color = Dirichlet_multinomial_4),
+    size = 5,
+    alpha = 0.8,
+    fill = cols[k]
+  ) +
+  xlab ("PCo 1") + ylab ("PCo 2") +
+  theme (
+    axis.title.x = element_text (size = 13),
+    axis.text.x = element_text (size = 13),
+    axis.text.y = element_text (size = 13),
+    axis.title.y = element_text (size = 13),
+    legend.position = "bottom"
+  ) +
+  stat_ellipse(aes(color = Dirichlet_multinomial_4)) +
+  geom_point(
+    data = centroids,
+    size = 5,
+    shape = 16,
+    color = "black"
+  ) + # centroides hinzufügen
+  geom_point(data = centroids,
+             size = 4,
+             shape = 16) -> Bcluster_uuk
+
+# Add density plots
+md_uuk_com %>%
+  ggplot(aes(x = V1), fill = cols[k]) +
+  geom_density(alpha = .5,
+               aes(fill = Dirichlet_multinomial_4,
+                   color = Dirichlet_multinomial_4)) +
+  # scale_fill_manual(values= cols[k]) +
+  # scale_color_manual(values=cols[k]) +
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.line.x = element_blank(),
+    #axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    #axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none"
+  ) -> xdensity
+#xdensity
+
+md_uuk_com %>%
+  ggplot(aes(V2), fill = cols[k]) +
+  geom_density(alpha = .5,
+               aes(fill = Dirichlet_multinomial_4,
+                   color = Dirichlet_multinomial_4)) +
+  # scale_fill_manual(values=pal.Coll) +
+  # scale_color_manual(values=pal.Coll) +
+  theme_classic() +
+  theme(
+    #axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    #axis.line.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  ) +
+  theme(legend.position = "none") +
+  coord_flip() -> ydensity
+#ydensity
+
+# Create blank plot to use for combining beta + the two desity plots
+blankPlot <- ggplot() + geom_blank(aes(1, 1)) +
+  theme(
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank()
+  )
+# bulid the final plot
+# titnew = "Lotus2 SLV138 human reads filter"
+Bpul_uuk <-
+  plot_grid(
+    xdensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    blankPlot + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    Bcluster_uuk + theme(legend.position = "none",
+                         plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    ydensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    nrow = 2,
+    rel_widths = c(4, 1.4),
+    rel_heights = c(1.4, 4),
+    align = "hv"
+  )
+Bpul_uuk
+```
+
+more bet-div plots for HIV and UK vs. Uganda Geo_loc
+
+```{r}
+# prepare the plot
+pal.Coll_uuk <- c("#04a3bd", "#20235b")
+centroids <- aggregate(cbind(V1, V2) ~ geo_loc, md_uuk_com, mean)
+md_uuk_com %>%
+  ggplot (aes (x = V1, y = V2, color = geo_loc)) +
+  theme_classic () +
+  scale_color_manual(values = pal.Coll_uuk) +
+  geom_point (aes (color = geo_loc),
+              size = 5, alpha = 0.8) +
+  xlab ("PCo 1") + ylab ("PCo 2") +
+  theme (
+    axis.title.x = element_text (size = 13),
+    axis.text.x = element_text (size = 13),
+    axis.text.y = element_text (size = 13),
+    axis.title.y = element_text (size = 13),
+    legend.position = "bottom"
+  ) +
+  stat_ellipse(aes(color = geo_loc)) +
+  geom_point(
+    data = centroids,
+    size = 5,
+    shape = 16,
+    color = "black"
+  ) + # centroides hinzufügen
+  geom_point(data = centroids,
+             size = 4,
+             shape = 16) -> Bcluster_uuk
+
+# Add density plots
+md_uuk_com %>%
+  ggplot(aes(x = V1)) +
+  geom_density(alpha = .5, aes(fill = geo_loc,
+                               color = geo_loc)) +
+  scale_fill_manual(values = pal.Coll_uuk) +
+  scale_color_manual(values = pal.Coll_uuk) +
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.line.x = element_blank(),
+    #axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    #axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none"
+  ) -> xdensity
+#xdensity
+
+md_uuk_com %>%
+  ggplot(aes(V2)) +
+  geom_density(alpha = .5, aes(fill = geo_loc,
+                               color = geo_loc)) +
+  scale_fill_manual(values = pal.Coll_uuk) +
+  scale_color_manual(values = pal.Coll_uuk) +
+  theme_classic() +
+  theme(
+    #axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    #axis.line.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  ) +
+  theme(legend.position = "none") +
+  coord_flip() -> ydensity
+#ydensity
+
+# Create blank plot to use for combining beta + the two desity plots
+blankPlot <- ggplot() + geom_blank(aes(1, 1)) +
+  theme(
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank()
+  )
+# bulid the final plot
+Pul_uuk <-
+  plot_grid(
+    xdensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    blankPlot + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    Bcluster_uuk + theme(legend.position = "none",
+                         plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    ydensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    nrow = 2,
+    rel_widths = c(4, 1.4),
+    rel_heights = c(1.4, 4),
+    align = "hv"
+  )
+Pul_uuk
+
+```
+
+Permanova - geo_loc
+
+```{r}
+# PERMANOVA 
+permanova_geo <-
+  adonis (vegdist (t(OTU_uuk), method = "bray", na.rm = T) ~ as.factor(geo_loc), data = md_uuk_com)
+permanova_geo
+```
+
+Hiv_status
+
+```{r}
+# prepare the plot
+pal.Coll_hiv <- c("#f0be3d", "#247d3f")
+md_uuk_com <- md_uuk_com %>%
+  na.omit()
+centroids <- aggregate(cbind(V1, V2) ~ Hiv_test , md_uuk_com, mean)
+
+md_uuk_com$Hiv_test[md_uuk_com$Hiv_test == "No"] <- 0
+md_uuk_com %>%
+  ggplot (aes (x = V1, y = V2, color = Hiv_test)) +
+  theme_classic () +
+  scale_color_manual(values = pal.Coll_hiv) +
+  geom_point (aes (color = Hiv_test),
+              size = 5, alpha = 0.8) +
+  xlab ("PCo 1") + ylab ("PCo 2") +
+  theme (
+    axis.title.x = element_text (size = 13),
+    axis.text.x = element_text (size = 13),
+    axis.text.y = element_text (size = 13),
+    axis.title.y = element_text (size = 13),
+    legend.position = "bottom"
+  ) +
+  stat_ellipse(aes(color = Hiv_test)) +
+  geom_point(
+    data = centroids,
+    size = 5,
+    shape = 16,
+    color = "black"
+  ) + # centroides hinzufügen
+  geom_point(data = centroids,
+             size = 4,
+             shape = 16) -> Bcluster_uuk
+
+# Add density plots
+md_uuk_com %>%
+  ggplot(aes(x = V1)) +
+  geom_density(alpha = .5, aes(fill = Hiv_test,
+                               color = Hiv_test)) +
+  scale_fill_manual(values = pal.Coll_hiv) +
+  scale_color_manual(values = pal.Coll_hiv) +
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.line.x = element_blank(),
+    #axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    #axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none"
+  ) -> xdensity
+#xdensity
+
+md_uuk_com %>%
+  ggplot(aes(V2)) +
+  geom_density(alpha = .5, aes(fill = Hiv_test,
+                               color = Hiv_test)) +
+  scale_fill_manual(values = pal.Coll_hiv) +
+  scale_color_manual(values = pal.Coll_hiv) +
+  theme_classic() +
+  theme(
+    #axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    #axis.line.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  ) +
+  theme(legend.position = "none") +
+  coord_flip() -> ydensity
+#ydensity
+
+# Create blank plot to use for combining beta + the two desity plots
+blankPlot <- ggplot() + geom_blank(aes(1, 1)) +
+  theme(
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank()
+  )
+# bulid the final plot
+Hivpul_uuk <-
+  plot_grid(
+    xdensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    blankPlot + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    Bcluster_uuk + theme(legend.position = "none",
+                         plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    ydensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    nrow = 2,
+    rel_widths = c(4, 1.4),
+    rel_heights = c(1.4, 4),
+    align = "hv"
+  )
+Hivpul_uuk
+```
+
+Permanova hiv_status
+
+```{r}
+# PERMANOVA 
+# drop na
+# md_uuk_com <- md_uuk_com[!is.na(md_uuk_com$Hiv_test), ]
+# rownames(OTU_uuk) %in% rownames(md_uuk_com)
+# permanova_hiv <- adonis (vegdist (t(OTU_uuk), method = "bray", na.rm = T) ~ as.factor(Hiv_test),data = md_uuk_com)
+# permanova_hiv
+```
+
+chiq testing and heatmap (geo_locs - community types)
+
+```{r}
+# md_uuk_com$Dirichlet_multinomial_4[metadata_beta$Dirichlet_multinomial_4 == 1] <- "Community 1"
+# md_uuk_com$Dirichlet_multinomial_4[metadata_beta$Dirichlet_multinomial_4 == 2] <- "Community 2"
+# md_uuk_com$Dirichlet_multinomial_4[metadata_beta$Dirichlet_multinomial_4 == 3] <- "Community 3"
+# md_uuk_com$Dirichlet_multinomial_4[metadata_beta$Dirichlet_multinomial_4 == 4] <- "Community 4"
+
+md_uuk_fram <- md_uuk_com
+md_uuk_fram$Dirichlet_multinomial_4[md_uuk_fram$Dirichlet_multinomial_4 == "1"] <- "Community 1"
+md_uuk_fram$Dirichlet_multinomial_4[md_uuk_fram$Dirichlet_multinomial_4 == "2"] <- "Community 2"
+md_uuk_fram$Dirichlet_multinomial_4[md_uuk_fram$Dirichlet_multinomial_4 == "3"] <- "Community 3"
+md_uuk_fram$Dirichlet_multinomial_4[md_uuk_fram$Dirichlet_multinomial_4 == "4"] <- "Community 4"
+
+aFrame_com_1u <- reshape2::melt(t(apply(table (md_uuk_fram$geo_loc, md_uuk_fram$Dirichlet_multinomial_4),
+                         1, function(x) x/sum(x))))
+
+heatmapcomu <- ggplot (aFrame_com_1u, aes (x = Var1, y = Var2)) +
+  theme_classic () +
+  theme (axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+         legend.position = "none", 
+         axis.title = element_blank()) +
+  geom_tile (aes (fill = value), colour = "black") +
+  geom_text (aes (label = scales::percent(value, accuracy = 1))) +
+  scale_fill_gradient(high = "#d7301f", low = "#fff7ec") 
+# scale_color_brewer(palette = "PiYG") +
+print(heatmapcomu) 
+```
+
+look at alpha div
+
+```{r}
+rtk_div_uuk <-
+  read.table(
+    here::here(
+      "input",
+      "Lotus2_Uganda_SLV138",
+      "higherLvl",
+      "Rarefaction",
+      "OTU_median_alpha_diversity.tsv"
+    ),
+    header = T,
+    row.names = 1,
+    sep = "\t"
+  )
+
+colnames(rtk_div_uuk) <-
+  c("richness",
+    "shannon",
+    "simpson",
+    "inv.simpson",
+    "chao1",
+    "eveness")
+rtk_div_uuk <- rtk_div_uuk[-c(1),]
+rownames(rtk_div_uuk) <- sub("\\-", ".", rownames(rtk_div_uuk))
+
+#row.names(md_uuk_com) <- md_uuk_com$Row.names
+#md_uuk_com$Row.names <- NULL
+
+md_uuk_com <- merge(md_uuk_com, rtk_div_uuk, by = 0)
+row.names(md_uuk_com) <- md_uuk_com$Row.names
+md_uuk_com$Row.names <- NULL
+md_uuk_com$shannon <- as.numeric(md_uuk_com$shannon)
+md_uuk_com %>%
+  # dplyr::group_by(DualStatus)%>%
+  wilcox_test(shannon ~ geo_loc) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance() %>%
+  add_xy_position(x = "geo_loc") -> stats_test
+
+
+md_uuk_com %>%
+  #dplyr::group_by(Line)%>%
+  ggplot(aes(x = geo_loc, y = shannon)) +
+  geom_boxplot(color = "black",
+               alpha = 0.5,
+               outlier.shape = NA) +
+  geom_point(
+    position = position_jitter(0.2),
+    size = 3,
+    aes(
+      fill = geo_loc,
+      color = geo_loc,
+      shape = Hiv_test
+    )
+  ) +
+  scale_color_manual(values = pal.Coll_uuk) +
+  #scale_fill_npg() +
+  #scale_shape_manual(values = c(21, 24))+
+  xlab("DualStatus") +
+  ylab("Microbiome richness (Shannon Index)") +
+  labs(tag = "A)", caption = get_pwc_label(stats_test)) +
+  theme_bw() +
+  theme(
+    text = element_text(size = 16),
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x.bottom = element_text(size = 16),
+    legend.position = "right"
+  ) +
+  stat_pvalue_manual(
+    stats_test,
+    bracket.nudge.y = -2,
+    step.increase = 0.05,
+    hide.ns = T,
+    tip.length = 0,
+    label = "{p.adj} {p.adj.signif}"
+  ) -> A
+A
+```
+plot shannon div as color gradient in beta-div plot: is alpha-div main driver of beta-div
+
+```{r}
+# dummy up data
+dat1 <- md_uuk_com[md_uuk_com$geo_loc == "Uganda", ]
+dat2 <- md_uuk_com[md_uuk_com$geo_loc == "Europe", ]
+
+# geom_point with two scales
+ggplot() +
+       geom_point(data=dat1, aes(x = V1, y = V2, color = geo_loc, fill = shannon), shape=21, size=4) +
+       geom_point(data= dat2, aes(x = V1, y = V2, color = geo_loc, fill = shannon), shape=21, size=4) +
+       scale_fill_gradient(low="black", high="white")+
+  theme_classic()
+
+# Add density plots
+md_uuk_com %>%
+  ggplot(aes(x = V1)) +
+  geom_density(alpha = .5, aes(fill = Hiv_test,
+                               color = Hiv_test)) +
+  scale_fill_manual(values = pal.Coll_hiv) +
+  scale_color_manual(values = pal.Coll_hiv) +
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.line.x = element_blank(),
+    #axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    #axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none"
+  ) -> xdensity
+#xdensity
+
+md_uuk_com %>%
+  ggplot(aes(V2)) +
+  geom_density(alpha = .5, aes(fill = Hiv_test,
+                               color = Hiv_test)) +
+  scale_fill_manual(values = pal.Coll_hiv) +
+  scale_color_manual(values = pal.Coll_hiv) +
+  theme_classic() +
+  theme(
+    #axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    #axis.line.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  ) +
+  theme(legend.position = "none") +
+  coord_flip() -> ydensity
+#ydensity
+
+# Create blank plot to use for combining beta + the two desity plots
+blankPlot <- ggplot() + geom_blank(aes(1, 1)) +
+  theme(
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank()
+  )
+# bulid the final plot
+Bpul_uuk <-
+  plot_grid(
+    xdensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    blankPlot + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    Bcluster_uuk + theme(legend.position = "bottom",
+                         plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    ydensity + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")),
+    nrow = 2,
+    rel_widths = c(4, 1.4),
+    rel_heights = c(1.4, 4),
+    align = "hv"
+  )
+Bpul_uuk
+
+
+```
+
+metadeconfR run on features == phylum and metadata == geo_loc + community type 
+```{r}
+phylum_uuk <- read.table(here::here("input", "Lotus2_Uganda_SLV138", "higherLvl","Rarefaction", "Phylum_rarefied_to_8278.000000_n_0.tsv"), header = T)
+phylum_uuk$Rarefied <- make.names(phylum_uuk$Rarefied, unique = T)
+row.names(phylum_uuk) <- phylum_uuk$Rarefied
+phylum_uuk$Rarefied <- NULL
+
+# remove not bacteria 
+phylum_uuk <- phylum_uuk[grep(patter= "Bacteria",x = row.names(phylum_uuk)), ]
+
+phylum_puk <- as.data.frame(row.names(phylum_uuk))
+colnames(phylum_puk) <- "long_names"
+phylum_names_uuk <- tidyr::separate(
+  phylum_puk,
+  long_names,
+  into = c("A", "B"),
+  sep = "\\.",
+  fill = "right",
+  extra = "drop"
+)
+write.table(phylum_names_uuk,
+            here::here("output", "phylum_names_pretty_uuk.tsv"))
+
+
+# prepare metadeconf.R
+
+phylum_uuk <- as.data.frame(t(phylum_uuk)) 
+dim(phylum_uuk)
+ad.index.keep <- which(colSums(phylum_uuk)*100/(sum(phylum_uuk)) > 0.01)
+phylum_uuk <- phylum_uuk[, ad.index.keep]
+dim(phylum_uuk)
+
+
+md_uuk_metd <- md_uuk_fram[,- c(4:5)]
+md_uuk_metd$smpl <- row.names(md_uuk_metd)
+md_uuk_metd <- fastDummies::dummy_cols(.data = md_uuk_metd, select_columns = "Dirichlet_multinomial_4")
+md_uuk_metd$Dirichlet_multinomial_4 <- NULL
+row.names(md_uuk_metd) <- md_uuk_metd$smpl
+md_uuk_metd$smpl <- NULL
+phylum_uuk <- phylum_uuk[order(rownames(phylum_uuk)), ]
+md_uuk_metd <- md_uuk_metd[order(rownames(md_uuk_metd)), ]
+
+md_uuk_metd$Hiv_test[md_uuk_metd$Hiv_test == "No"] <- 0
+md_uuk_metd$Hiv_test <- as.numeric(md_uuk_metd$Hiv_test)
+md_uuk_metd <- md_uuk_metd %>%
+  na.omit()
+
+md_uuk_metd <- read.table(here::here("intermediate", "md_uuk_metd.tsv"), sep = "\t", header = T, row.names = 1)
+
+md_uuk_metd$geo_loc <- as.numeric(md_uuk_metd$geo_loc)
+phylum_uuk <- phylum_uuk[rownames(phylum_uuk) %in% rownames(md_uuk_metd), ]
+
+meta_output_woConta_phylumuuk <- metadeconfoundR::MetaDeconfound(featureMat = phylum_uuk , 
+                                   metaMat = md_uuk_metd, nnodes = 4, 
+                                   logfile = here::here("intermediate", "MetadeconfoundR_wo_conta_phylum_uuk.log"))
+
+mphylum_uuk <- metadeconfoundR::BuildHeatmap(meta_output_woConta_phylumuuk, d_col = c("blue", "white", "red"), d_range = "full")
+## changes the names to italic
+mphylum_uuk_1 <- mphylum_uuk +
+  theme(axis.text.y = element_text(face ="italic"))
+```
+
+
+loook at the most abundance species in the Uganda - UK dataset 
+```{r}
+md_uuk_only <- md_uuk_metd[, -c (3:6)]
+md_uuk_only$geo_loc[md_uuk_only$geo_loc == 1] <- "Uganda"
+md_uuk_only$geo_loc[md_uuk_only$geo_loc == 0] <- "Europe"
+md_uuk_only <- fastDummies::dummy_cols(.data = md_uuk_only, select_columns = "geo_loc")
+meta_outputwocon_phylumuuk <- metadeconfoundR::MetaDeconfound(featureMat = phylum_uuk , 
+                                   metaMat = md_uuk_only, nnodes = 4, returnLong = T,
+                                   logfile = here::here("intermediate", "MetadeconfoundR_wo_conta_phylum_uuk_onlyloc.log"))
+
+locphylum_uuk <- metadeconfoundR::BuildHeatmap(meta_outputwocon_phylumuuk, d_col = c("blue", "white", "red"), d_range = "full")
+## changes the names to italic
+locphylum_uuk_1 <- locphylum_uuk +
+  theme(axis.text.y = element_text(face ="italic"))
+locphylum_uuk_1
+```
+
+
+
+
